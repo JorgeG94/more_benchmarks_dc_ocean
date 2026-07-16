@@ -21,7 +21,7 @@ BACKEND ?= cuda
 # -DMODEL_NZ_STACK_MAX=128 is production's (NOT the 256 header default); WITH_CUDA
 # matches the benchmark's Fortran/CUDA flags. Appended to BOTH toolchains below.
 DEFS        := -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA
-BASE_FFLAGS := -Mfree -Mbackslash -O3 -fast -I../common $(DEFS)
+BASE_FFLAGS := $(FFLAGS_BASE) -I../common $(DEFS)
 DC_SRCS     := constants.F90 grid.F90 ocean_metrics.F90 multilayer_cgrid_state.F90 \
                ocean_boundary_types.F90 ocean_eos.F90 ocean_redi.F90 drivers/dc_main.F90
 
@@ -33,7 +33,7 @@ ifeq ($(DATA),acc)
 else ifeq ($(DATA),omp)
   DC_MODE_FLAGS := -stdpar=gpu -mp=gpu -gpu=$(ARCH),mem:separate -gpu=tripcount:host -DDC_DATA_OMP
 else ifeq ($(DATA),none)
-  DC_MODE_FLAGS := -stdpar=multicore
+  DC_MODE_FLAGS := $(DC_HOST_FLAGS)
 else
   $(error DATA must be acc | omp | none)
 endif

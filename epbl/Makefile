@@ -23,7 +23,7 @@ BACKEND ?= cuda
 # MODEL_NZ_STACK_MAX mirrors the production stack cap.
 DEFS := -DMODEL_NZ_STACK_MAX=128 -DEPBL_LB_THREADS=128 -DEPBL_LB_BLOCKS_PER_SM=4
 
-BASE_FFLAGS := -Mfree -Mbackslash -O3 -fast -I../common $(DEFS)
+BASE_FFLAGS := $(FFLAGS_BASE) -I../common $(DEFS)
 # Module order matches ../epbl_benchmark's OBJS (minus ocean_epbl_plain), with
 # drivers/dc_main.F90 replacing epbl_bench.F90 as the DC-only driver.
 DC_SRCS     := constants.F90 grid.F90 epbl_stubs.F90 ocean_epbl.F90 drivers/dc_main.F90
@@ -37,7 +37,7 @@ ifeq ($(DATA),acc)
 else ifeq ($(DATA),omp)
   DC_MODE_FLAGS := -stdpar=gpu -mp=gpu -gpu=$(ARCH),mem:separate -DDC_DATA_OMP
 else ifeq ($(DATA),none)
-  DC_MODE_FLAGS := -stdpar=multicore
+  DC_MODE_FLAGS := $(DC_HOST_FLAGS)
 else
   $(error DATA must be acc | omp | none)
 endif

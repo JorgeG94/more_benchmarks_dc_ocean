@@ -25,6 +25,31 @@ NZSTACK  ?= 128
 # redi_benchmark spells the same knob STACK
 STACK    ?= $(NZSTACK)
 
+# --- base Fortran flags for the do-concurrent COMPUTE, per compiler ----------
+# The compute is standard F2018 `do concurrent`; only these base flags change by
+# compiler. The GPU data layer (DATA=acc|omp, added by each kernel's Makefile)
+# is nvfortran-only; DATA=none is the portable CPU build and works with any
+# compiler that supports F2018 `do concurrent ... local(...)` -- nvfortran,
+# gfortran >= 12, or ifx >= 2023. Keyed on FC; override on the CLI too.
+ifeq ($(notdir $(FC)),nvfortran)
+  FFLAGS_BASE   ?= -Mfree -Mbackslash -O3 -fast
+  # DATA=none: run do concurrent across CPU cores
+  DC_HOST_FLAGS ?= -stdpar=multicore
+else ifeq ($(notdir $(FC)),gfortran)
+  FFLAGS_BASE   ?= -O3
+  DC_HOST_FLAGS ?=
+else ifeq ($(notdir $(FC)),ifx)
+  FFLAGS_BASE   ?= -O3
+  DC_HOST_FLAGS ?=
+else ifeq ($(notdir $(FC)),amdflang)
+  FFLAGS_BASE   ?= -O3
+  DC_HOST_FLAGS ?=
+else
+  # unknown compiler: a plain optimised build is the safe default
+  FFLAGS_BASE   ?= -O3
+  DC_HOST_FLAGS ?=
+endif
+
 # ---- GPU-C comparison-kernel backend: cuda (default) | hip ------------------
 BACKEND  ?= cuda
 

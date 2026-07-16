@@ -22,7 +22,7 @@ BACKEND ?= cuda
 # NOT the 256 default in constants.F90's #define. Appended to BOTH flag sets.
 DEFS := -DMODEL_NZ_STACK_MAX=128
 
-BASE_FFLAGS := -Mfree -Mbackslash -O3 -fast -I../common $(DEFS)
+BASE_FFLAGS := $(FFLAGS_BASE) -I../common $(DEFS)
 # module compile-order (from ../ale_remap_benchmark OBJS): the PRODUCTION DC
 # variant only -- ale_remap.F90 built with default MODNAME (no ASYNC/PPM_DIRECT/
 # COLLAPSE_FIX/FLATSIG). The _acc/_fix/_fused variants are dropped.
@@ -37,7 +37,7 @@ ifeq ($(DATA),acc)
 else ifeq ($(DATA),omp)
   DC_MODE_FLAGS := -stdpar=gpu -mp=gpu -gpu=$(ARCH),mem:separate -gpu=tripcount:host -DDC_DATA_OMP
 else ifeq ($(DATA),none)
-  DC_MODE_FLAGS := -stdpar=multicore
+  DC_MODE_FLAGS := $(DC_HOST_FLAGS)
 else
   $(error DATA must be acc | omp | none)
 endif

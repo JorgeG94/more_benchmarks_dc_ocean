@@ -24,7 +24,7 @@ BACKEND ?= cuda
 NZSTACK ?= 128
 DEFS    := -DMODEL_NZ_STACK_MAX=$(NZSTACK)
 
-BASE_FFLAGS := -Mfree -Mbackslash -O3 -fast -I../common $(DEFS)
+BASE_FFLAGS := $(FFLAGS_BASE) -I../common $(DEFS)
 DC_SRCS     := constants.F90 ks_state.F90 ks.F90 drivers/dc_main.F90
 
 # ---- do-concurrent build mode: DATA selects the device data layer ----------
@@ -36,7 +36,7 @@ ifeq ($(DATA),acc)
 else ifeq ($(DATA),omp)
   DC_MODE_FLAGS := -stdpar=gpu -mp=gpu -gpu=$(ARCH),mem:separate -DDC_DATA_OMP
 else ifeq ($(DATA),none)
-  DC_MODE_FLAGS := -stdpar=multicore
+  DC_MODE_FLAGS := $(DC_HOST_FLAGS)
 else
   $(error DATA must be acc | omp | none)
 endif
