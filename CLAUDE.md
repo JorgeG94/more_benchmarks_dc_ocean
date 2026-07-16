@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Orientation for this repo. Keep it lightweight — details live in `LOGBOOK.md`
+Orientation for this repo. Keep it lightweight — details live in `NOTES_ON_PERF.md`
 (the answer + method) and each kernel's `README.md`.
 
 ## What this is
@@ -10,7 +10,7 @@ GPU-native ocean model anything vs hand-written CUDA C, and is a C++/HIP rewrite
 worth it?** Each kernel is benchmarked as `do concurrent`, a faithful CUDA C
 port, and (some) a native `cudaMalloc` driver.
 
-**Answer (`LOGBOOK.md`):** the OpenACC→CUDA bridge is free, a full rewrite buys
+**Answer (`NOTES_ON_PERF.md`):** the OpenACC→CUDA bridge is free, a full rewrite buys
 single-digit % of wall time, portable-Fortran fixes buy ~3× more; on the biggest
 kernel (`ocean_redi`, ~40%) `do concurrent` already wins. Optimizing a kernel's
 *algorithm* (e.g. continuity 11 loops → 3) beats hand-CUDA and ports to DC.
@@ -59,7 +59,7 @@ per-compiler flags). Override on the CLI too (`make ARCH=cc90 NVARCH=sm_90 …`)
   C++-vs-Fortran verdict.
 - `nvbug_*/` — two filed nvfortran bug reproducers.
 - `daxpy_benchmark/`, `continuity_ppm_benchmark/` — old odds-and-ends (no twin).
-- `LOGBOOK.md` / `RESUME_GPU_MRE.md` — session handoffs; read these first.
+- `NOTES_ON_PERF.md` — the performance findings + compiler notes; read this first.
 
 ## Conventions & gotchas (the non-obvious stuff)
 

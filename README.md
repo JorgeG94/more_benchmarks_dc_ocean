@@ -5,7 +5,7 @@ hand-written CUDA C — and is a C++/HIP rewrite worth it? This repo isolates th
 model's hottest kernels as minimal reproducers and measures each one three ways:
 `do concurrent`, a faithful CUDA C port, and a native `cudaMalloc` driver.
 
-**The answer is in [`LOGBOOK.md`](LOGBOOK.md):** the OpenACC→CUDA bridge is free
+**The answer is in [`NOTES_ON_PERF.md`](NOTES_ON_PERF.md):** the OpenACC→CUDA bridge is free
 (native ties `host_data`-launched CUDA in every kernel), a full rewrite buys
 single-digit % of wall time, portable-Fortran fixes buy ~3× more, and on the
 biggest kernel (`ocean_redi`, ~40% of runtime) `do concurrent` already wins.
@@ -73,20 +73,19 @@ make clean                 # remove all build + run artifacts
 
 ## Where things are
 
-- [`LOGBOOK.md`](LOGBOOK.md) — the answer, the method, and the profile that ranks
-  the kernels by share of runtime.
-- [`RESUME_GPU_MRE.md`](RESUME_GPU_MRE.md) — the first session (coastal flux
-  kernel, the two filed compiler bugs).
+- [`NOTES_ON_PERF.md`](NOTES_ON_PERF.md) — the answer, the method, the profile
+  that ranks the kernels, and the compiler findings. Read this first.
 - `common/` — `directives.h` (Fortran data-layer macros) and `gpu_rt.h` (the C++
   CUDA↔HIP redirect): the single-sourced plumbing every kernel shares.
 - `<kernel>/` — the build-mode kernels (`redi`, `kappa_shear`,
-  `continuity_layered`, `ale_remap`, `btstep`, `epbl`, `meke`, `hll_fluxes`),
-  each with its own README.
-- `<kernel>_benchmark/` — the original per-kernel MREs, kept as results-of-record.
-- `final_picture/` — collates every kernel into the weighted C++-vs-Fortran verdict.
+  `continuity_layered`, `ale_remap`, `btstep`, `epbl`, `meke`, `hll_fluxes`,
+  `hvisc`), each with its own README.
+- `legacy_testing/*_benchmark/` — the original single-binary DC-vs-CUDA
+  benchmarks, retired (kept building until deleted).
+- `final_picture/` — collates the legacy benchmarks into the weighted
+  C++-vs-Fortran verdict.
 - `nvbug_*/` — the two filed nvfortran bug reproducers.
-- `daxpy_benchmark/` — the original interop MRE: OpenACC owns the memory, pure
-  CUDA C computes on it, via one `host_data use_device` directive.
+- `daxpy_benchmark/`, `continuity_ppm_benchmark/` — old odds-and-ends (no twin).
 
 ## What's been validated where
 
