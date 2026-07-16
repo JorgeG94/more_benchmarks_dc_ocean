@@ -1,4 +1,4 @@
--include ../config.mk
+-include ../../config.mk
 # Barotropic substep: `do concurrent` vs CUDA C (faithful / fused / graph).
 #
 #   source ../../<model>-sea-ice/environments/toolkits/<system>/nvhpc.sh

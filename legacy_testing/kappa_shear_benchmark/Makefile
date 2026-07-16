@@ -1,4 +1,4 @@
--include ../config.mk
+-include ../../config.mk
 # kappa-shear (JHL08) column kernel: `do concurrent` vs hand-written CUDA C.
 #
 #   source ../../<model>-sea-ice/environments/toolkits/<system>/nvhpc.sh

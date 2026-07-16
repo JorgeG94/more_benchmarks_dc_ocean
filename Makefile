@@ -22,10 +22,12 @@
 ROOT := $(CURDIR)
 include $(ROOT)/config.mk
 
-# Benchmarks in profile-share order (biggest first). See LOGBOOK.md sec 4.
-BENCH := redi_benchmark kappa_shear_benchmark continuity_layered_benchmark \
+# Original benchmarks (profile-share order) -- retired to legacy_testing/,
+# kept building until deleted. The active kernels are the build-mode KERNELS.
+BENCH := $(addprefix legacy_testing/, \
+         redi_benchmark kappa_shear_benchmark continuity_layered_benchmark \
          ale_remap_benchmark btstep_benchmark epbl_benchmark \
-         meke_benchmark hll_fluxes_benchmark
+         meke_benchmark hll_fluxes_benchmark)
 
 # Vars forwarded to every sub-make so config.mk / the CLI stay authoritative.
 FWD := BACKEND=$(BACKEND) ARCH=$(ARCH) NVARCH=$(NVARCH) \
@@ -92,8 +94,8 @@ run-all-cuda: all-cuda
 	  $(MAKE) --no-print-directory -C $$k run-dc; \
 	  $(MAKE) --no-print-directory -C $$k run-cpp; done
 
-# Every subdir with its own Makefile (all 10 benchmarks, incl. ppm + daxpy).
-MAKEDIRS := $(patsubst %/,%,$(dir $(wildcard */Makefile)))
+# Every subdir with its own Makefile (top-level + retired legacy_testing/).
+MAKEDIRS := $(patsubst %/,%,$(dir $(wildcard */Makefile) $(wildcard legacy_testing/*/Makefile)))
 
 # Full clean: every benchmark's own clean, plus the nvbug repros, the scratch
 # cubin dir, and the generated final_picture logs/results. Sources are untouched.

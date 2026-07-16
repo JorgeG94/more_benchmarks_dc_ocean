@@ -50,14 +50,14 @@ run_one () {  # key dir bench_cmd native_cmd
 [ "$BUILD" = "1" ] && { echo "== make all-dc =="; make -C "$ROOT" all-dc || exit 1; }
 
 #        key      dir                            bench command                                              native command
-run_one  redi     redi_benchmark                "./redi_bench 473 297 30 20 10"                            "./redi_native 473 297 30 20 10"
-run_one  ks       kappa_shear_benchmark         "./ks_bench 473 297 30 20 10 1"                            "./ks_native 473 297 30 20 10 1"
-run_one  layered  continuity_layered_benchmark  "./layered_bench 473 297 30 200 10 2"                      "./layered_native 473 297 30 200 10 2"
-run_one  ale      ale_remap_benchmark           "./ale_bench 473 297 30 20 10 25"                          "./ale_native 473 297 30 20 10 25"
-run_one  btstep   btstep_benchmark              "./btstep_bench 473 297 24 200 10"                         "./btstep_native 473 297 24 200 10"
-run_one  epbl     epbl_benchmark                "./epbl_bench 473 297 30 20 8 1 0 20 5"                    "./epbl_native 473 297 30 20 8 1 0 20 5"
-run_one  meke     meke_benchmark                "./meke_bench"                                             "./meke_native"
-run_one  flux     hll_fluxes_benchmark          "FLUX_NPHYS_X=473 FLUX_NPHYS_Y=297 FLUX_REPS=2000 ./flux_bench"  "./flux_native 473 297 2 2000"
+run_one  redi     legacy_testing/redi_benchmark                "./redi_bench 473 297 30 20 10"                            "./redi_native 473 297 30 20 10"
+run_one  ks       legacy_testing/kappa_shear_benchmark         "./ks_bench 473 297 30 20 10 1"                            "./ks_native 473 297 30 20 10 1"
+run_one  layered  legacy_testing/continuity_layered_benchmark  "./layered_bench 473 297 30 200 10 2"                      "./layered_native 473 297 30 200 10 2"
+run_one  ale      legacy_testing/ale_remap_benchmark           "./ale_bench 473 297 30 20 10 25"                          "./ale_native 473 297 30 20 10 25"
+run_one  btstep   legacy_testing/btstep_benchmark              "./btstep_bench 473 297 24 200 10"                         "./btstep_native 473 297 24 200 10"
+run_one  epbl     legacy_testing/epbl_benchmark                "./epbl_bench 473 297 30 20 8 1 0 20 5"                    "./epbl_native 473 297 30 20 8 1 0 20 5"
+run_one  meke     legacy_testing/meke_benchmark                "./meke_bench"                                             "./meke_native"
+run_one  flux     legacy_testing/hll_fluxes_benchmark          "FLUX_NPHYS_X=473 FLUX_NPHYS_Y=297 FLUX_REPS=2000 ./flux_bench"  "./flux_native 473 297 2 2000"
 
 [ "$DC_ONLY" = "1" ] && exit 0
 echo

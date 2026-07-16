@@ -1,4 +1,4 @@
--include ../config.mk
+-include ../../config.mk
 # Layered continuity-PPM kernel: `do concurrent` vs a faithful CUDA C port.
 #
 #   source ../../<model>-sea-ice/environments/toolkits/<system>/nvhpc.sh

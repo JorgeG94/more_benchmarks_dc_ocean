@@ -1,4 +1,4 @@
--include ../config.mk
+-include ../../config.mk
 # Redi neutral diffusion: `do concurrent` vs a faithful CUDA C port.
 #
 #   source ../../<model>-sea-ice/environments/toolkits/<system>/nvhpc.sh

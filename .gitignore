@@ -84,3 +84,14 @@ final_picture/results/
 
 # scratch cubin dump (make clean removes it)
 tmp_local_artifacts/
+
+# retired benchmarks (legacy_testing/): ignore rebuilt binaries + profiling;
+# sources are tracked (moved via git mv). .o/.mod/*_ref.bin already covered.
+legacy_testing/**/*_bench
+legacy_testing/**/*_native
+legacy_testing/**/*_pure
+legacy_testing/**/*.nsys-rep
+legacy_testing/**/*.sqlite
+
+# opt A/B harness binary (continuity_layered/ab_main.cu)
+continuity_layered/ab

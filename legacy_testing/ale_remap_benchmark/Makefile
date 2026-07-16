@@ -1,4 +1,4 @@
--include ../config.mk
+-include ../../config.mk
 # ALE remap: production `do concurrent` vs improved Fortran vs hand-written CUDA C.
 #
 #   source ../../<model>-sea-ice/environments/toolkits/<system>/nvhpc.sh

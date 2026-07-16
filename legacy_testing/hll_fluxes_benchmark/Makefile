@@ -1,4 +1,4 @@
--include ../config.mk
+-include ../../config.mk
 # HLL flux kernel: `do concurrent` variants vs a faithful CUDA C port.
 #
 #   source ../../<model>-sea-ice/environments/toolkits/<system>/nvhpc.sh
