@@ -31,23 +31,31 @@ STACK    ?= $(NZSTACK)
 # is nvfortran-only; DATA=none is the portable CPU build and works with any
 # compiler that supports F2018 `do concurrent ... local(...)` -- nvfortran,
 # gfortran >= 12, or ifx >= 2023. Keyed on FC; override on the CLI too.
+# MODFLAG: how the compiler is told where to WRITE .mod files. Spelled as a
+# space-separated flag so the kernel Makefiles use `$(MODFLAG) <dir>` uniformly:
+#   nvfortran / ifx -> -module <dir>;  gfortran -> -J <dir>;  flang -> -module-dir.
 ifeq ($(notdir $(FC)),nvfortran)
   FFLAGS_BASE   ?= -Mfree -Mbackslash -O3 -fast
   # DATA=none: run do concurrent across CPU cores
   DC_HOST_FLAGS ?= -stdpar=multicore
+  MODFLAG       ?= -module
 else ifeq ($(notdir $(FC)),gfortran)
   FFLAGS_BASE   ?= -O3
   DC_HOST_FLAGS ?=
+  MODFLAG       ?= -J
 else ifeq ($(notdir $(FC)),ifx)
   FFLAGS_BASE   ?= -O3
   DC_HOST_FLAGS ?=
+  MODFLAG       ?= -module
 else ifeq ($(notdir $(FC)),amdflang)
   FFLAGS_BASE   ?= -O3
   DC_HOST_FLAGS ?=
+  MODFLAG       ?= -module-dir
 else
   # unknown compiler: a plain optimised build is the safe default
   FFLAGS_BASE   ?= -O3
   DC_HOST_FLAGS ?=
+  MODFLAG       ?= -J
 endif
 
 # ---- GPU-C comparison-kernel backend: cuda (default) | hip ------------------

@@ -13,6 +13,7 @@
 #   make all-cuda               # do concurrent (OpenACC) + native CUDA, per kernel
 #   make all-omp                # do concurrent via OpenMP target (AMD/Intel-portable)
 #   make all-cpu                # do concurrent on the CPU (no CUDA/OpenACC/OpenMP-target)
+#   make run-cpu                # ...then RUN all 8 small on the CPU (make FC=gfortran run-cpu)
 #   make all-hip                # native HIP (structural -- needs hipcc/ROCm)
 #   make verify-all             # every kernel: OpenACC dumps a ref, CPU cross-checks it
 #
@@ -60,7 +61,7 @@ picture:
 # ============================================================================
 KERNELS := continuity_layered redi kappa_shear ale_remap btstep epbl meke hll_fluxes hvisc
 
-.PHONY: all-cuda all-omp all-cpu all-hip verify-all run-all-cuda
+.PHONY: all-cuda all-omp all-cpu all-hip verify-all run-all-cuda run-cpu
 
 # NVIDIA: do concurrent (OpenACC) + the native CUDA driver, per kernel.
 all-cuda:
@@ -77,6 +78,17 @@ all-omp:
 all-cpu:
 	@for k in $(KERNELS); do echo "==> $$k  dc(none)"; \
 	  $(MAKE) --no-print-directory -C $$k dc DATA=none || exit 1; done
+
+# Build (if needed) + RUN every kernel's CPU do-concurrent binary, small & fast.
+# The GPU-sized defaults (473x297, up to 200 reps) are slow on a CPU, so run a
+# small grid/few reps. Only the leading `nx ny nz nreps nwarm` are overridden --
+# any kernel-specific trailing args keep their own defaults. Tune via CPU_ARGS.
+#   make FC=gfortran run-cpu                     # all 8, small
+#   make FC=gfortran run-cpu CPU_ARGS="256 256 30 20 5"
+CPU_ARGS ?= 96 96 10 8 2
+run-cpu: all-cpu
+	@for k in $(KERNELS); do echo "== $$k =="; \
+	  $(MAKE) --no-print-directory -C $$k run-dc DATA=none ARGS="$(CPU_ARGS)" || exit 1; done
 
 # AMD: native HIP driver (structural -- needs hipcc/ROCm; see config.mk).
 all-hip:

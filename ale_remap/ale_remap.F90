@@ -21,7 +21,7 @@
 !!   * `ocean_remap_tracer_field`, `remap_x_face_velocity`,
 !!     `remap_y_face_velocity`, `rescale_anomaly_ke` -- transcribed line-for-line.
 !!
-!! DROPPED (each verified dead for every config in ~/analysis_gebco/*.nml,
+!! DROPPED (each verified dead for every config under ~/analysis_gebco, all .nml,
 !! ALL of which set `vcoord_type = "zstar"`):
 !!   1. The `VCOORD_EULERIAN_Z .or. VCOORD_LAGRANGIAN` early return.
 !!   2. The `VCOORD_RHO / VCOORD_HYCOM` branch, i.e. `build_ts_concentration`
