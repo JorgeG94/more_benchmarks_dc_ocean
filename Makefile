@@ -58,7 +58,7 @@ picture:
 # Strategy is a build MODE (make dc DATA=... / make cpp BACKEND=...), not a
 # directory. See continuity_layered/README.md and common/{directives,gpu_rt}.h.
 # ============================================================================
-KERNELS := continuity_layered redi kappa_shear ale_remap btstep epbl meke hll_fluxes
+KERNELS := continuity_layered redi kappa_shear ale_remap btstep epbl meke hll_fluxes hvisc
 
 .PHONY: all-cuda all-omp all-cpu all-hip verify-all run-all-cuda
 
