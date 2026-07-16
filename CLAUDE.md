@@ -62,9 +62,6 @@ per-compiler flags). Override on the CLI too (`make ARCH=cc90 NVARCH=sm_90 …`)
 
 ## Conventions & gotchas (the non-obvious stuff)
 
-- **Anonymise.** Kernels are extracts of a real model — strip its name and any
-  account paths (`rki`/`rakali`/`/home/...`/`/scratch/...`); use `<model>`,
-  `<system>` placeholders, as the committed code does.
 - **Correctness = bit-identity.** DC and CUDA must agree; the bar is `max rel
   diff < 1e-12` (FMA-contraction level). A perturbation-of-1-ulp check should
   trip the comparison — verify the verifier.
@@ -73,14 +70,5 @@ per-compiler flags). Override on the CLI too (`make ARCH=cc90 NVARCH=sm_90 …`)
   inputs over via the ref dump and *adopt* them, or you measure libm.
 - **`-gpu=tripcount:host` is load-bearing** (NVHPC 26.5 regression, TPR #38714) —
   without it timings are ~2× wrong. It's in the kernel Makefiles; keep it.
-- **Two known nvfortran bugs** (reported, since addressed): lost auto-collapse
-  when a callee's explicit-shape array is bounded by an integer passed **by
-  reference** — fix is to pass the *bounds* by `value` (not the loop indices);
-  and lost CSE when a callee does its own array indexing — fix is to pass hoisted
-  *scalars*. Inlining the loop body dodges both.
 - **`config.mk`:** never put an inline `# comment` on a `VAR ?= value` line — the
   trailing spaces leak into the value and break `-gpu=$(ARCH),mem:separate`.
-- **Shared GPU** (V100 analysis node): benchmarks report min-of-reps with warmup;
-  for A/B use idle-gating / alternating order, or you measure contention.
-- **gfortran here is 8.5** (pre-F2018 `do concurrent local`) — the CPU/omp paths
-  are wired via `MODFLAG` but need gfortran ≥ 12 / ifx to actually compile.
