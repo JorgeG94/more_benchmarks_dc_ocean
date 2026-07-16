@@ -14,6 +14,7 @@
 -include ../config.mk
 FC      ?= nvfortran
 NVCC    ?= nvcc
+MODFLAG ?= -module
 ARCH    ?= cc70
 GPU_ARCHFLAG ?= -arch=sm_70
 BACKEND ?= cuda
@@ -68,7 +69,7 @@ $(DCBLD) $(CPPBLD):
 	@mkdir -p $@
 
 $(DCBLD)/%.o: %.F90 ../common/directives.h | $(DCBLD)
-	$(FC) $(BASE_FFLAGS) $(DC_MODE_FLAGS) -module $(DCBLD) -c $< -o $@
+	$(FC) $(BASE_FFLAGS) $(DC_MODE_FLAGS) $(MODFLAG) $(DCBLD) -c $< -o $@
 
 $(DCBIN): $(DCOBJS)
 	$(FC) $(BASE_FFLAGS) $(DC_MODE_FLAGS) $(DCOBJS) -o $@

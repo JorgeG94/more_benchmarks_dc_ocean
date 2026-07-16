@@ -11,7 +11,7 @@ module ocean_boundary_types
 
    public :: ocean_bc_state_t, ocean_bc_face_tag_t, OBC_WALL
 
-   integer, parameter, public :: OBC_WALL = 1
+   integer, parameter :: OBC_WALL = 1   ! public via the list above (declare access once: gfortran rejects a 2nd)
 
    type :: ocean_bc_face_tag_t
       integer :: bc_type = OBC_WALL
