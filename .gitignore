@@ -95,3 +95,6 @@ legacy_testing/**/*.sqlite
 
 # opt A/B harness binary (continuity_layered/ab_main.cu)
 continuity_layered/ab
+
+# A/B optimization harness binary (opt_kernel.cu + ab_main.cu)
+*/ab
