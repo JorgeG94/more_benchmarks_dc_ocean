@@ -84,7 +84,6 @@ make clean                 # remove all build + run artifacts
   benchmarks, retired (kept building until deleted).
 - `final_picture/` — collates the legacy benchmarks into the weighted
   C++-vs-Fortran verdict.
-- `nvbug_*/` — the two filed nvfortran bug reproducers.
 - `daxpy_benchmark/`, `continuity_ppm_benchmark/` — old odds-and-ends (no twin).
 
 ## What's been validated where

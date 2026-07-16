@@ -57,7 +57,6 @@ per-compiler flags). Override on the CLI too (`make ARCH=cc90 NVARCH=sm_90 …`)
   benchmarks, retired (kept building until deleted).
 - `final_picture/` — collates the legacy benchmarks into the weighted
   C++-vs-Fortran verdict.
-- `nvbug_*/` — two filed nvfortran bug reproducers.
 - `daxpy_benchmark/`, `continuity_ppm_benchmark/` — old odds-and-ends (no twin).
 - `NOTES_ON_PERF.md` — the performance findings + compiler notes; read this first.
 
@@ -74,11 +73,11 @@ per-compiler flags). Override on the CLI too (`make ARCH=cc90 NVARCH=sm_90 …`)
   inputs over via the ref dump and *adopt* them, or you measure libm.
 - **`-gpu=tripcount:host` is load-bearing** (NVHPC 26.5 regression, TPR #38714) —
   without it timings are ~2× wrong. It's in the kernel Makefiles; keep it.
-- **Two filed compiler bugs** (`nvbug_*/`): lost auto-collapse when a callee's
-  explicit-shape array is bounded by an integer passed **by reference** — fix is
-  to pass the *bounds* by `value` (not the loop indices); and lost CSE when a
-  callee does its own array indexing — fix is to pass hoisted *scalars*. Inlining
-  the loop body dodges both.
+- **Two known nvfortran bugs** (reported, since addressed): lost auto-collapse
+  when a callee's explicit-shape array is bounded by an integer passed **by
+  reference** — fix is to pass the *bounds* by `value` (not the loop indices);
+  and lost CSE when a callee does its own array indexing — fix is to pass hoisted
+  *scalars*. Inlining the loop body dodges both.
 - **`config.mk`:** never put an inline `# comment` on a `VAR ?= value` line — the
   trailing spaces leak into the value and break `-gpu=$(ARCH),mem:separate`.
 - **Shared GPU** (V100 analysis node): benchmarks report min-of-reps with warmup;

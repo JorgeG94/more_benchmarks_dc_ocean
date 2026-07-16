@@ -61,12 +61,12 @@ divergence-bound (→ algorithmic).
 - **`-gpu=tripcount:host` is load-bearing** (NVHPC 26.5 regression, NVIDIA
   TPR #38714): without it, device-side trip-counts insert a per-kernel data
   refresh in multi-loop regions → timings ~2× wrong. It's in the Makefiles.
-- **Bug 1 — lost auto-collapse** (`nvbug_dc_collapse/`): a `do concurrent` stops
+- **Bug 1 — lost auto-collapse:** a `do concurrent` stops
   collapsing when a callee's explicit-shape array dummy is bounded by an integer
   passed **by reference** + the body has a call. **Fix: pass the array *bounds*
   by `value`** (`nx,ny` — verified necessary & sufficient; the loop indices
   `i,j` by value do nothing).
-- **Bug 2 — lost CSE** (`nvbug_inline_cse/`): redundant global loads when an
+- **Bug 2 — lost CSE:** redundant global loads when an
   inlined callee does its own array indexing. **Fix: hoist reads and pass
   scalars.** Inlining the loop body dodges both bug 1 and bug 2.
 - **Bug 3 — `maxregcount` quality:** at an identical register cap nvfortran
