@@ -78,7 +78,7 @@ module continuity_layered
    use multilayer_cgrid_state, only: multilayer_cgrid_state_t
    implicit none
    private
-   public :: continuity_t, continuity_compute_fluxes
+   public :: continuity_t, continuity_compute_fluxes, continuity_compute_fluxes_fused
    ! MRE-only: production keeps the helpers private. Exposed so the FLAT/ACC
    ! controls can reuse them verbatim. The bodies below are the verbatim extract.
    public :: ppm_mirror_h, ppm_limited_slope, ppm_cell_limiter, ppm_limit_pos
@@ -254,6 +254,145 @@ contains
               ms%mass_flux_y_layer(i, j, k)))*metrics%iareaT(i, j)
       end do
    end subroutine continuity_compute_fluxes
+
+   !! FUSED variant (best-CUDA-practice port back to do concurrent):
+   !! reconstruct the upwind cell inline per face and write mass_flux
+   !! directly -- the h_face_left/right_x/y workspaces never touch memory.
+   !! 11 loops -> 3, ~280 MB/call of intermediate traffic removed. Inlined
+   !! (no array-bound-by-ref call, no callee array indexing) so it auto-
+   !! collapses AND dodges the lost-CSE bug. Bit-identical to the reference.
+   pure subroutine continuity_compute_fluxes_fused(grid, metrics, this, ms)
+      type(hgrid_t), intent(in) :: grid
+      type(ocean_metrics_t), intent(in) :: metrics
+      type(continuity_t), intent(in) :: this
+      type(multilayer_cgrid_state_t), intent(inout) :: ms
+      integer :: i, j, k, nx, ny, nz, c, ng, nxp, nyp
+      real(wp) :: uu, vv, h_face, dh_m1, dh_0, dh_p1, h_left, h_right
+      real(wp) :: hm2, hm1, h0, hp1, hp2
+      logical :: do_pos
+      real(wp) :: h_min_pos
+
+      nx = grid%nx_total; ny = grid%ny_total; nz = ms%nz_ml
+      ng = grid%nghost; nxp = grid%nx_phys; nyp = grid%ny_phys
+      do_pos = this%use_ppm_limit_pos; h_min_pos = this%h_min
+
+      ! ---- X mass flux: one iter per face i=1:nx+1, recon upwind cell inline
+      do concurrent(k=1:nz, j=1:ny, i=1:nx + 1) &
+         local(uu, h_face, c, dh_m1, dh_0, dh_p1, h_left, h_right, hm2, hm1, h0, hp1, hp2)
+         if (i == 1 .or. i == nx + 1 .or. i == ng + 1 .or. i == ng + nxp + 1) then
+            ms%mass_flux_x_layer(i, j, k) = 0.0_wp
+         else
+            uu = ms%u_face_x_layer(i, j, k)
+            if (uu >= 0.0_wp) then
+               if (i == 2) then; h_face = ms%h_layer(1, j, k)
+               else if (i == 3) then; h_face = ms%h_layer(2, j, k)
+               else if (i == nx) then; h_face = ms%h_layer(nx - 1, j, k)
+               else
+                  c = i - 1
+                  h0 = ms%h_layer(c, j, k)
+                  hm1 = ppm_mirror_h(ms%h_layer(c - 1, j, k), h0, metrics%wet_T(c - 1, j))
+                  hp1 = ppm_mirror_h(ms%h_layer(c + 1, j, k), h0, metrics%wet_T(c + 1, j))
+                  hm2 = ppm_mirror_h(ms%h_layer(c - 2, j, k), hm1, metrics%wet_T(c - 2, j))
+                  hp2 = ppm_mirror_h(ms%h_layer(c + 2, j, k), hp1, metrics%wet_T(c + 2, j))
+                  call ppm_limited_slope(hm2, hm1, h0, dh_m1)
+                  call ppm_limited_slope(hm1, h0, hp1, dh_0)
+                  call ppm_limited_slope(h0, hp1, hp2, dh_p1)
+                  dh_0 = dh_0*metrics%wet_T(c - 1, j)*metrics%wet_T(c, j)*metrics%wet_T(c + 1, j)
+                  h_left = 0.5_wp*(hm1 + h0) - (dh_0 - dh_m1)/6.0_wp
+                  h_right = 0.5_wp*(h0 + hp1) - (dh_p1 - dh_0)/6.0_wp
+                  call ppm_cell_limiter(h0, h_left, h_right)
+                  if (do_pos) call ppm_limit_pos(h0, h_left, h_right, h_min_pos)
+                  h_face = h_right
+               end if
+            else
+               if (i == 2) then; h_face = ms%h_layer(2, j, k)
+               else if (i == 3) then; h_face = ms%h_layer(2, j, k)
+               else if (i == nx - 1) then; h_face = ms%h_layer(nx - 1, j, k)
+               else if (i == nx) then; h_face = ms%h_layer(nx, j, k)
+               else
+                  c = i
+                  h0 = ms%h_layer(c, j, k)
+                  hm1 = ppm_mirror_h(ms%h_layer(c - 1, j, k), h0, metrics%wet_T(c - 1, j))
+                  hp1 = ppm_mirror_h(ms%h_layer(c + 1, j, k), h0, metrics%wet_T(c + 1, j))
+                  hm2 = ppm_mirror_h(ms%h_layer(c - 2, j, k), hm1, metrics%wet_T(c - 2, j))
+                  hp2 = ppm_mirror_h(ms%h_layer(c + 2, j, k), hp1, metrics%wet_T(c + 2, j))
+                  call ppm_limited_slope(hm2, hm1, h0, dh_m1)
+                  call ppm_limited_slope(hm1, h0, hp1, dh_0)
+                  call ppm_limited_slope(h0, hp1, hp2, dh_p1)
+                  dh_0 = dh_0*metrics%wet_T(c - 1, j)*metrics%wet_T(c, j)*metrics%wet_T(c + 1, j)
+                  h_left = 0.5_wp*(hm1 + h0) - (dh_0 - dh_m1)/6.0_wp
+                  h_right = 0.5_wp*(h0 + hp1) - (dh_p1 - dh_0)/6.0_wp
+                  call ppm_cell_limiter(h0, h_left, h_right)
+                  if (do_pos) call ppm_limit_pos(h0, h_left, h_right, h_min_pos)
+                  h_face = h_left
+               end if
+            end if
+            ms%mass_flux_x_layer(i, j, k) = uu*h_face*metrics%dy_cu(i, j)
+         end if
+      end do
+
+      ! ---- Y mass flux: one iter per face j=1:ny+1
+      do concurrent(k=1:nz, j=1:ny + 1, i=1:nx) &
+         local(vv, h_face, c, dh_m1, dh_0, dh_p1, h_left, h_right, hm2, hm1, h0, hp1, hp2)
+         if (j == 1 .or. j == ny + 1 .or. j == ng + 1 .or. j == ng + nyp + 1) then
+            ms%mass_flux_y_layer(i, j, k) = 0.0_wp
+         else
+            vv = ms%v_face_y_layer(i, j, k)
+            if (vv >= 0.0_wp) then
+               if (j == 2) then; h_face = ms%h_layer(i, 1, k)
+               else if (j == 3) then; h_face = ms%h_layer(i, 2, k)
+               else if (j == ny) then; h_face = ms%h_layer(i, ny - 1, k)
+               else
+                  c = j - 1
+                  h0 = ms%h_layer(i, c, k)
+                  hm1 = ppm_mirror_h(ms%h_layer(i, c - 1, k), h0, metrics%wet_T(i, c - 1))
+                  hp1 = ppm_mirror_h(ms%h_layer(i, c + 1, k), h0, metrics%wet_T(i, c + 1))
+                  hm2 = ppm_mirror_h(ms%h_layer(i, c - 2, k), hm1, metrics%wet_T(i, c - 2))
+                  hp2 = ppm_mirror_h(ms%h_layer(i, c + 2, k), hp1, metrics%wet_T(i, c + 2))
+                  call ppm_limited_slope(hm2, hm1, h0, dh_m1)
+                  call ppm_limited_slope(hm1, h0, hp1, dh_0)
+                  call ppm_limited_slope(h0, hp1, hp2, dh_p1)
+                  dh_0 = dh_0*metrics%wet_T(i, c - 1)*metrics%wet_T(i, c)*metrics%wet_T(i, c + 1)
+                  h_left = 0.5_wp*(hm1 + h0) - (dh_0 - dh_m1)/6.0_wp
+                  h_right = 0.5_wp*(h0 + hp1) - (dh_p1 - dh_0)/6.0_wp
+                  call ppm_cell_limiter(h0, h_left, h_right)
+                  if (do_pos) call ppm_limit_pos(h0, h_left, h_right, h_min_pos)
+                  h_face = h_right
+               end if
+            else
+               if (j == 2) then; h_face = ms%h_layer(i, 2, k)
+               else if (j == 3) then; h_face = ms%h_layer(i, 2, k)
+               else if (j == ny - 1) then; h_face = ms%h_layer(i, ny - 1, k)
+               else if (j == ny) then; h_face = ms%h_layer(i, ny, k)
+               else
+                  c = j
+                  h0 = ms%h_layer(i, c, k)
+                  hm1 = ppm_mirror_h(ms%h_layer(i, c - 1, k), h0, metrics%wet_T(i, c - 1))
+                  hp1 = ppm_mirror_h(ms%h_layer(i, c + 1, k), h0, metrics%wet_T(i, c + 1))
+                  hm2 = ppm_mirror_h(ms%h_layer(i, c - 2, k), hm1, metrics%wet_T(i, c - 2))
+                  hp2 = ppm_mirror_h(ms%h_layer(i, c + 2, k), hp1, metrics%wet_T(i, c + 2))
+                  call ppm_limited_slope(hm2, hm1, h0, dh_m1)
+                  call ppm_limited_slope(hm1, h0, hp1, dh_0)
+                  call ppm_limited_slope(h0, hp1, hp2, dh_p1)
+                  dh_0 = dh_0*metrics%wet_T(i, c - 1)*metrics%wet_T(i, c)*metrics%wet_T(i, c + 1)
+                  h_left = 0.5_wp*(hm1 + h0) - (dh_0 - dh_m1)/6.0_wp
+                  h_right = 0.5_wp*(h0 + hp1) - (dh_p1 - dh_0)/6.0_wp
+                  call ppm_cell_limiter(h0, h_left, h_right)
+                  if (do_pos) call ppm_limit_pos(h0, h_left, h_right, h_min_pos)
+                  h_face = h_left
+               end if
+            end if
+            ms%mass_flux_y_layer(i, j, k) = vv*h_face*metrics%dx_cv(i, j)
+         end if
+      end do
+
+      ! ---- divergence (unchanged)
+      do concurrent(k=1:nz, j=1:ny, i=1:nx)
+         ms%flux_h_layer(i, j, k) = &
+            ((ms%mass_flux_x_layer(i + 1, j, k) - ms%mass_flux_x_layer(i, j, k)) + &
+             (ms%mass_flux_y_layer(i, j + 1, k) - ms%mass_flux_y_layer(i, j, k)))*metrics%iareaT(i, j)
+      end do
+   end subroutine continuity_compute_fluxes_fused
 
    pure elemental function ppm_mirror_h(h_nbr, h_loc, w_nbr) result(h_out)
       DC_ROUTINE_SEQ
