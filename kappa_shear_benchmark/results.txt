@@ -1,0 +1,48 @@
+### NZ_STACK_MAX sweep (nz=30 fixed, 473x297) -- the one-line build check
+  NZ_STACK_MAX=32  [473 297 30 20 10 1]
+    dc   min/med/max :    38.69    38.70    38.73
+    cuda min/med/max :    34.78    34.81    34.83
+    ratio dc/cuda (min/min) : 1.113 x
+  NZ_STACK_MAX=128  [473 297 30 20 10 1]
+    dc   min/med/max :    39.60    39.61    39.67
+    cuda min/med/max :    34.75    34.76    34.77
+    ratio dc/cuda (min/min) : 1.139 x
+  NZ_STACK_MAX=256  [473 297 30 20 10 1]
+    dc   min/med/max :    40.76    40.77    40.81
+    cuda min/med/max :    35.17    35.20    35.29
+    ratio dc/cuda (min/min) : 1.159 x
+
+### production configs (nghost=3, nz=30), NZ_STACK_MAX=128 = production V100 build
+  10km    108x137x30  [108 137 30 20 10 1]
+    dc   min/med/max :     5.82     5.86     6.03
+    cuda min/med/max :     5.15     5.18     5.19
+    ratio dc/cuda (min/min) : 1.130 x
+  0.1deg  473x297x30  [473 297 30 20 10 1]
+    dc   min/med/max :    39.98    40.01    40.25
+    cuda min/med/max :    35.11    35.11    35.22
+    ratio dc/cuda (min/min) : 1.139 x
+  0.25deg 240x560x30  [240 560 30 20 10 1]
+    dc   min/med/max :    38.56    38.56    38.56
+    cuda min/med/max :    34.91    34.92    34.94
+    ratio dc/cuda (min/min) : 1.104 x
+  0.05deg 945x594x30  [945 594 30 20 10 1]
+    dc   min/med/max :   147.89   147.93   147.98
+    cuda min/med/max :   131.00   131.04   131.12
+    ratio dc/cuda (min/min) : 1.129 x
+
+### nz sensitivity (the serial dimension), 473x297
+  0.1deg nz=15  [473 297 15 20 10 1]
+    dc   min/med/max :    13.89    13.96    13.98
+    cuda min/med/max :    12.15    12.17    12.19
+    ratio dc/cuda (min/min) : 1.143 x
+  0.1deg nz=50  [473 297 50 20 10 1]
+    dc   min/med/max :    82.85    82.90    82.93
+    cuda min/med/max :    72.43    72.45    72.47
+    ratio dc/cuda (min/min) : 1.144 x
+
+### land fraction (divergence from the wet_mask early-out), 473x297x30
+  land 25%  [473 297 30 20 10 1 25]
+    dc   min/med/max :    36.94    36.95    37.00
+    cuda min/med/max :    32.16    32.17    32.20
+    ratio dc/cuda (min/min) : 1.149 x
+DONE

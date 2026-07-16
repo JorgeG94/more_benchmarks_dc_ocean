@@ -1,0 +1,9 @@
+key,display,share_pct,unit,note
+redi,ocean_redi,40.1,ms/call,biggest region; redi_apply_flux
+ks,ocean_vmix_kshear,18.5,ms/rep,iterative shear solver
+layered,ocean_continuity,7.0,ms/rep,layered continuity (the kernel ocean_continuity wraps)
+ale,ocean_ale_remap,5.7,ms,ALE remap
+btstep,ocean_barotropic,4.7,ms/call,barotropic step = 24 inner substeps
+epbl,ocean_vmix_epbl,1.8,ms/rep,EPBL; its 1.33x is a compiler register-alloc bug not a language win
+meke,MEKE,,ms/step,no profiler region -- share unknown; excluded from totals
+flux,coastal_hll,,ms/rep,coastal path -- not in the open-ocean profile; excluded from totals

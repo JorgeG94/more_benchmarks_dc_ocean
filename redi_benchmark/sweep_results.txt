@@ -1,0 +1,21 @@
+min-of-3, V100, nvfortran 26.5-0, NZ_STACK_MAX=128, production flags
+order=0 (DC, CUDA, PRECOMP). See README "Caveats" on variance.
+
+ config                 cells     dc_ms  cuda_ms   pre_ms  dc/cuda  dc/pre
+ -----------------------------------------------------------------------
+ 10km     (108x137)     489060      6.04     5.36     4.14    1.127   1.458
+ 0.1deg   (473x297)    4354110     44.60    45.04    33.02    0.990   1.351
+ 0.25deg  (240x560)    4177080     42.74    42.69    30.10    1.001   1.420
+ 3km      (359x458)    5080800     52.03    54.53    37.65    0.954   1.382
+
+ 0.05deg  (945x594)   17118000   EXCLUDED -- did not reproduce on this node.
+   Raw, same binary, same args, differing only in `order`:
+     order=0 (DC,CUDA,PRE): DC=161.8  CUDA=345.6  PRE=265.3
+     order=1 (PRE,CUDA,DC): DC=404.5  CUDA=593.2  PRE=276.4
+   DC reads 161.8 or 404.5 (2.5x) purely by position in the run; CUDA is
+   slower than DC in both orders yet the two are BIT-IDENTICAL and every
+   smaller config has them within 5%. Not explained. Ruled out: GPU memory
+   (9.0 GB of 32 GB, computed), CPU contention (20 cores, load 3.2), another
+   process on the GPU (nvidia-smi: only redi_bench). Most likely sustained-load
+   thermal drift, but the ordering is not monotonic, so that does not fit
+   either. DO NOT QUOTE THIS ROW.

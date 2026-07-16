@@ -1,0 +1,86 @@
+# Build artifacts
+*.o
+*.mod
+*.s
+*.ptx
+
+# Executables
+hll_fluxes_benchmark/flux_bench
+nvbug_dc_collapse/repro
+nvbug_inline_cse/repro
+daxpy_benchmark/daxpy_dc
+daxpy_benchmark/daxpy_cuda
+daxpy_benchmark/daxpy_pure
+continuity_ppm_benchmark/continuity_bench
+continuity_layered_benchmark/layered_bench
+btstep_benchmark/btstep_bench
+btstep_benchmark/btstep_native
+btstep_benchmark/tmp_local_artifacts/
+meke_benchmark/meke_bench
+meke_benchmark/meke_native
+epbl_benchmark/epbl_native
+redi_benchmark/redi_bench
+redi_benchmark/redi_native
+
+# reference dumps written by `MEKE_DUMP=1 ./meke_bench` for meke_native --verify
+meke_benchmark/meke_ref_*.bin
+
+# reference dump written by `BTSTEP_REF_OUT=... ./btstep_bench` for `make verify`,
+# plus the sample files native_vs_fortran.sh leaves behind
+btstep_benchmark/btstep_cuda_ref.bin
+btstep_benchmark/clean_[fn].txt
+
+# reference dump written by `./epbl_bench <args> 1` (arg 10) for epbl_native's
+# self-check -- inputs + mld/kd_int per variant, ~110 MB at the profiled config
+epbl_benchmark/epbl_ref.f64
+
+# reference dumps written by `./redi_bench <args> 1` (arg 7) for redi_native's
+# bit-exact self-check (`make native-verify`) -- IC + final state, ~100 MB each
+# at the 0.1 deg config
+redi_benchmark/redi_ref_*.bin
+
+# reference dump written by `KS_DUMP=<path> ./ks_bench` for ks_native's
+# bit-identity self-check (`make native-verify`) -- inputs + kd_int(dc) + kd_cu,
+# ~250 MB at the 0.1 deg config. `make native-verify` removes it; this catches
+# the interrupted-run case.
+kappa_shear_benchmark/ks_ref.bin
+
+# reference dump written by `FLUX_DUMP_REF=1 ./flux_bench` for flux_native's
+# bit-identity check -- inputs + the CUDA-via-Fortran outputs + flatdc, ~1.2 GB
+# at 4096^2. `make clean-ref` removes it; this catches the interrupted-run case.
+hll_fluxes_benchmark/flux_ref_*.bin
+
+*_benchmark/*.nsys-rep
+*_benchmark/*.sqlite
+*_benchmark/*.ncu-rep
+
+# local tooling config (contains absolute paths)
+.claude/
+
+# built executables — agents added new benchmark dirs, so match by location
+# rather than listing each one (three were committed by accident and had to be
+# untracked: ale_bench, epbl_bench, ks_bench).
+*_benchmark/*_bench
+*_benchmark/*_native
+*_benchmark/*_pure
+
+# --- new build-mode layout (per-kernel dirs like continuity_layered/) ---
+# strategy is a build MODE, so binaries are dc_<data> / cpp_<backend>, and each
+# mode compiles into its own build/ subdir. Match by name so future ported
+# kernels are covered without listing each dir.
+build/
+dc_acc
+dc_omp
+dc_none
+cpp_cuda
+cpp_hip
+# DC_DUMP / verify reference dumps (fh_ref.bin, kd_ref.bin, eta_ref.bin, ...).
+# The bathymetry input gabight_bathy_*.f64 is NOT a dump and stays tracked.
+*_ref.bin
+
+# --- final_picture harness: scripts + shares.csv are tracked; run outputs are not ---
+final_picture/logs/
+final_picture/results/
+
+# scratch cubin dump (make clean removes it)
+tmp_local_artifacts/

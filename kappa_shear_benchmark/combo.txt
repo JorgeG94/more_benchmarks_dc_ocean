@@ -1,0 +1,4 @@
+  as shipped (production)                        dc=39.57    cuda=35.36    dc/cuda=1.119  sum=3.299882E+05
+  + -gpu=maxregcount:96                          dc=37.44    cuda=34.87    dc/cuda=1.074  sum=3.299882E+05
+  + bounded copies (3 lines of Fortran)          dc=38.88    cuda=34.85    dc/cuda=1.116  sum=3.299882E+05
+  + BOTH                                         dc=36.52    cuda=34.84    dc/cuda=1.048  sum=3.299882E+05

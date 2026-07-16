@@ -1,0 +1,4 @@
+  nvfortran maxregcount=none  REG:254 STACK:66600          LDL+STL=16743  dc=39.64    | nvcc __launch_bounds__(128): regs=80 cuda=34.76
+  nvfortran maxregcount=128   REG:128 STACK:66688          LDL+STL=16858  dc=38.97    | nvcc __launch_bounds__(128): regs=80 cuda=34.85
+  nvfortran maxregcount=96    REG:96 STACK:66816           LDL+STL=17030  dc=37.49    | nvcc __launch_bounds__(128): regs=80 cuda=34.97
+  nvfortran maxregcount=64    REG:64 STACK:66904           LDL+STL=17637  dc=39.47    | nvcc __launch_bounds__(128): regs=80 cuda=34.98
