@@ -112,4 +112,9 @@ continuity_layered/ab
 # build/ tree (build/ already ignored above), and the symlinked bathymetry are not.
 ideal_benchmark/rk2
 ideal_benchmark/rk2_dc
+ideal_benchmark/rk2_cpu
+ideal_benchmark/build_cpu/
 ideal_benchmark/*.f64
+
+# paper-run CSV outputs (build_and_run_*.sh); commit specific finals by hand if wanted
+paper_data/
