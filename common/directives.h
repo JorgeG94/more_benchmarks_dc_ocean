@@ -24,6 +24,7 @@
 #  define DC_ENTER_CREATE(x) !$acc enter data create(x)
 #  define DC_EXIT(x) !$acc exit data delete(x)
 #  define DC_UPDATE_SELF(x) !$acc update self(x)
+#  define DC_UPDATE_DEVICE(x) !$acc update device(x)
 #  define DC_WAIT !$acc wait
 
 #elif defined(DC_DATA_OMP)
@@ -33,6 +34,7 @@
 #  define DC_ENTER_CREATE(x) !$omp target enter data map(alloc: x)
 #  define DC_EXIT(x) !$omp target exit data map(delete: x)
 #  define DC_UPDATE_SELF(x) !$omp target update from(x)
+#  define DC_UPDATE_DEVICE(x) !$omp target update to(x)
 #  define DC_WAIT !$omp taskwait
 
 #else
@@ -42,6 +44,7 @@
 #  define DC_ENTER_CREATE(x)
 #  define DC_EXIT(x)
 #  define DC_UPDATE_SELF(x)
+#  define DC_UPDATE_DEVICE(x)
 #  define DC_WAIT
 #endif
 

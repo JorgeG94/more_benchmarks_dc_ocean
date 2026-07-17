@@ -98,3 +98,18 @@ continuity_layered/ab
 
 # A/B optimization harness binary (opt_kernel.cu + ab_main.cu)
 */ab
+
+# do-concurrent A/B (dc_ab.F90: faithful DC vs optimized DC) and the
+# single-binary opt-CUDA-vs-opt-DC head-to-head (cmp_main.F90 + *_bridge.F90).
+# Sources live in <kernel>/drivers/ and are tracked; only the binaries are not.
+*/dc_ab_acc
+*/dc_ab_omp
+*/dc_ab_none
+*/cmp_acc
+
+# ideal_benchmark/: whole-model RK2 harness. Sources (rk2_main.F90, wrap/*.F90,
+# shim_*.cu, Makefile, README.md) are tracked; the linked binary, the per-kernel
+# build/ tree (build/ already ignored above), and the symlinked bathymetry are not.
+ideal_benchmark/rk2
+ideal_benchmark/rk2_dc
+ideal_benchmark/*.f64
