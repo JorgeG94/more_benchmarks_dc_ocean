@@ -28,6 +28,8 @@ BASE_FFLAGS := $(FFLAGS_BASE) -I../common $(DEFS)
 # variant only -- ale_remap.F90 built with default MODNAME (no ASYNC/PPM_DIRECT/
 # COLLAPSE_FIX/FLATSIG). The _acc/_fix/_fused variants are dropped.
 DC_SRCS     := constants.F90 remap_state.F90 kernel_remap.F90 ale_remap.F90 drivers/dc_main.F90
+# A/B build: same compute module, driver swapped for the faithful-vs-optimized harness
+DCAB_SRCS   := constants.F90 remap_state.F90 kernel_remap.F90 ale_remap.F90 drivers/dc_ab.F90
 
 # ---- do-concurrent build mode: DATA selects the device data layer ----------
 # tripcount:host is MANDATORY for this kernel (NVIDIA TPR #38714) -- carried by
@@ -46,6 +48,10 @@ DCBIN  := dc_$(DATA)
 DCBLD  := build/dc_$(DATA)
 DCOBJS := $(addprefix $(DCBLD)/,$(notdir $(DC_SRCS:.F90=.o)))
 
+DCABBIN  := dc_ab_$(DATA)
+DCABBLD  := build/dc_ab_$(DATA)
+DCABOBJS := $(addprefix $(DCABBLD)/,$(notdir $(DCAB_SRCS:.F90=.o)))
+
 # ---- native C++ build mode: BACKEND selects the GPU runtime ----------------
 CU_SRCS := ale_kernel.cu drivers/cpp_main.cu
 CUFLAGS := -O3 $(GPU_ARCHFLAG) -I../common --compiler-options -fPIC $(DEFS) -Wno-deprecated-gpu-targets
@@ -56,16 +62,32 @@ CPPBIN  := cpp_$(BACKEND)
 CPPBLD  := build/cpp_$(BACKEND)
 CUOBJS  := $(addprefix $(CPPBLD)/,$(notdir $(CU_SRCS:.cu=.o)))
 
+# ---- cmp build mode: SHARED single-binary head-to-head ---------------------
+# opt-DC (ale_remap_step_opt) and opt-CUDA (opt_kernel.cu::ale_remap_opt) on the
+# SAME device arrays via ale_bridge's `!$acc host_data use_device`. GPU-only
+# (host_data needs a device), so it always uses the DATA=acc flag set. The
+# Fortran side is compiled WITHOUT -cuda (that flag is LINK-ONLY, else the
+# host_data bridge trips NVFORTRAN-S-0528); the CUDA kernel is compiled by nvcc.
+CMP_ACC_FLAGS := -stdpar=gpu -acc=gpu -gpu=$(ARCH),mem:separate -gpu=tripcount:host -DDC_DATA_ACC
+CMP_F_SRCS := constants.F90 remap_state.F90 kernel_remap.F90 ale_remap.F90 \
+              drivers/ale_bridge.F90 drivers/cmp_main.F90
+CMPBIN  := cmp_acc
+CMPBLD  := build/cmp_acc
+CMPFOBJS := $(addprefix $(CMPBLD)/,$(notdir $(CMP_F_SRCS:.F90=.o)))
+CMPCUOBJ := $(CMPBLD)/opt_kernel.o
+
 vpath %.F90 . drivers
 vpath %.cu  . drivers
 
-.PHONY: dc cpp run-dc run-cpp verify clean
+.PHONY: dc dcab cpp cmp run-dc run-cpp run-cmp verify clean
 .NOTPARALLEL:            # honour the DC_SRCS dependency order
 
 dc: $(DCBIN)
+dcab: $(DCABBIN)
 cpp: $(CPPBIN)
+cmp: $(CMPBIN)
 
-$(DCBLD) $(CPPBLD):
+$(DCBLD) $(CPPBLD) $(DCABBLD) $(CMPBLD):
 	@mkdir -p $@
 
 $(DCBLD)/%.o: %.F90 ../common/directives.h | $(DCBLD)
@@ -74,11 +96,29 @@ $(DCBLD)/%.o: %.F90 ../common/directives.h | $(DCBLD)
 $(DCBIN): $(DCOBJS)
 	$(FC) $(BASE_FFLAGS) $(DC_MODE_FLAGS) $(DCOBJS) -o $@
 
+$(DCABBLD)/%.o: %.F90 ../common/directives.h | $(DCABBLD)
+	$(FC) $(BASE_FFLAGS) $(DC_MODE_FLAGS) $(MODFLAG) $(DCABBLD) -c $< -o $@
+
+$(DCABBIN): $(DCABOBJS)
+	$(FC) $(BASE_FFLAGS) $(DC_MODE_FLAGS) $(DCABOBJS) -o $@
+
 $(CPPBLD)/%.o: %.cu ../common/gpu_rt.h | $(CPPBLD)
 	$(NVCC) $(CUFLAGS) -c $< -o $@
 
 $(CPPBIN): $(CUOBJS)
 	$(NVCC) $(CUOBJS) -o $@ $(GPU_ARCHFLAG) -Wno-deprecated-gpu-targets
+
+# ---- cmp: Fortran (NO -cuda) + nvcc opt_kernel, linked by nvfortran (-cuda) --
+$(CMPBLD)/%.o: %.F90 ../common/directives.h | $(CMPBLD)
+	$(FC) $(BASE_FFLAGS) $(CMP_ACC_FLAGS) $(MODFLAG) $(CMPBLD) -c $< -o $@
+
+$(CMPCUOBJ): opt_kernel.cu ../common/gpu_rt.h | $(CMPBLD)
+	$(NVCC) -O3 $(GPU_ARCHFLAG) -I../common -I. $(DEFS) --compiler-options -fPIC \
+	        -Wno-deprecated-gpu-targets -c $< -o $@
+
+$(CMPBIN): $(CMPFOBJS) $(CMPCUOBJ)
+	$(FC) $(BASE_FFLAGS) -stdpar=gpu -acc=gpu -gpu=$(ARCH),mem:separate -cuda \
+	      $(CMPFOBJS) $(CMPCUOBJ) -o $@
 
 # args: nx_pts ny_pts nz reps warm hdrift%
 ARGS  ?= 473 297 30 200 10 25
@@ -87,6 +127,10 @@ run-dc: dc
 	@./$(DCBIN) $(ARGS)
 run-cpp: cpp
 	@./$(CPPBIN) $(ARGS)
+# Head-to-head must go through the GPU serializer (shared card). Build here,
+# run under gpu_run.sh so it waits for the card to go idle first.
+run-cmp: cmp
+	@bash ../tmp_local_artifacts/gpu_run.sh ale-cmp ./$(CMPBIN) $(ARGS)
 
 # Prove the macro'd data layer is numerically inert: OpenACC (GPU) writes a
 # reference; the CPU build recomputes and cross-checks it to FMA level.
@@ -97,4 +141,4 @@ verify:
 	@DC_REF=h_ref.bin  ./dc_none $(VARGS)
 
 clean:
-	@rm -rf build dc_acc dc_omp dc_none cpp_cuda cpp_hip h_ref.bin *.mod
+	@rm -rf build dc_acc dc_omp dc_none dc_ab_acc dc_ab_omp dc_ab_none cpp_cuda cpp_hip cmp_acc h_ref.bin *.mod

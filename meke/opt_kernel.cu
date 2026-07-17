@@ -289,3 +289,56 @@ extern "C" void meke_opt_launch(const MekeArgs *ap, double *meke_scratch) {
     cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) fprintf(stderr, "CUDA error (opt): %s\n", cudaGetErrorString(e));
 }
+
+// ===================== flat Fortran bridge ==================================
+// A uniform, bind(C)-friendly wrapper: every MekeArgs device pointer as an
+// individual argument (so the Fortran side can hand each one over inside a
+// single `!$acc host_data use_device(...)`), every scalar/int by value. It just
+// reassembles the struct and calls meke_opt_launch above -- calling that struct
+// entry point directly from Fortran is fiddly, this is not. Argument ORDER must
+// match the bind(C) interface in drivers/meke_bridge.F90 exactly; both mirror
+// the struct field groups in meke_args.h. `meke_scratch` is the nt-sized
+// double-buffer pass A writes and pass B reads.
+extern "C" void meke_opt_launch_flat(
+    // --- 30 device-array pointers (writable prognostic/workspace first) ---
+    double *meke, double *kh_diff, double *le, double *ku, double *i_mass,
+    double *depth_tot, double *bottom_fac2, double *barotr_fac2, double *src,
+    double *uflux, double *vflux, double *mass_ws, double *rd_ws,
+    double *sn_u_ws, double *sn_v_ws, double *ke_diss_ws,
+    // --- read-only inputs ---
+    const double *u_bbl2, const double *f_centre, const double *gm_src,
+    const double *ke_diss_ext, const double *h_layer, const double *rho_layer,
+    const double *areaT, const double *iareaT, const double *idxT,
+    const double *idyT, const double *dy_cu, const double *dx_cv,
+    const double *idxCu, const double *idyCv,
+    // --- sizes ---
+    int nx, int ny, int nz,
+    // --- config scalars (mirror MekeArgs / ocean_meke_t) ---
+    double dt, double dtscale, double cd_scale, double cb, double ct,
+    double min_gamma2, double cdrag, double uscale,
+    double a_deform, double a_rhines, double a_eady, double a_frict, double a_grid,
+    double bgsrc, double gmcoeff, double frcoeff, double damping,
+    double kh_bg, double k4, double khmeke_fac, double khcoeff,
+    double visc_coeff_ku, double rho0, int backscatter,
+    // --- the pass-A/pass-B double-buffer scratch (nt doubles) ---
+    double *meke_scratch)
+{
+    MekeArgs a;
+    a.meke = meke; a.kh_diff = kh_diff; a.le = le; a.ku = ku; a.i_mass = i_mass;
+    a.depth_tot = depth_tot; a.bottom_fac2 = bottom_fac2; a.barotr_fac2 = barotr_fac2;
+    a.src = src; a.uflux = uflux; a.vflux = vflux; a.mass_ws = mass_ws; a.rd_ws = rd_ws;
+    a.sn_u_ws = sn_u_ws; a.sn_v_ws = sn_v_ws; a.ke_diss_ws = ke_diss_ws;
+    a.u_bbl2 = u_bbl2; a.f_centre = f_centre; a.gm_src = gm_src; a.ke_diss_ext = ke_diss_ext;
+    a.h_layer = h_layer; a.rho_layer = rho_layer;
+    a.areaT = areaT; a.iareaT = iareaT; a.idxT = idxT; a.idyT = idyT;
+    a.dy_cu = dy_cu; a.dx_cv = dx_cv; a.idxCu = idxCu; a.idyCv = idyCv;
+    a.nx = nx; a.ny = ny; a.nz = nz;
+    a.dt = dt; a.dtscale = dtscale; a.cd_scale = cd_scale; a.cb = cb; a.ct = ct;
+    a.min_gamma2 = min_gamma2; a.cdrag = cdrag; a.uscale = uscale;
+    a.a_deform = a_deform; a.a_rhines = a_rhines; a.a_eady = a_eady;
+    a.a_frict = a_frict; a.a_grid = a_grid;
+    a.bgsrc = bgsrc; a.gmcoeff = gmcoeff; a.frcoeff = frcoeff; a.damping = damping;
+    a.kh_bg = kh_bg; a.k4 = k4; a.khmeke_fac = khmeke_fac; a.khcoeff = khcoeff;
+    a.visc_coeff_ku = visc_coeff_ku; a.rho0 = rho0; a.backscatter = backscatter;
+    meke_opt_launch(&a, meke_scratch);
+}

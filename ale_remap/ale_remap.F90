@@ -58,6 +58,9 @@ module MODNAME
    use kernel_remap, only: remap_column_ppm
 #else
    use kernel_remap, only: remap_column
+   ! remap_column_ppm: needed directly by the optimized T+S fused path
+   ! (remap_column_ppm2's nz<3 fallback). Harmless to the faithful path.
+   use kernel_remap, only: remap_column_ppm
 #endif
    implicit none
    private
@@ -66,6 +69,7 @@ module MODNAME
    real(wp), parameter :: H_FLOOR = 1.5e-4_wp
 
    public :: ale_remap_step
+   public :: ale_remap_step_opt
 
 contains
 
@@ -182,6 +186,291 @@ contains
       !$acc wait(1)   ! single drain: the whole remap ran on async(1)
 #endif
    end subroutine ale_remap_step
+
+   !! ========================================================================
+   !! OPTIMIZED VARIANT -- portable subset of the CUDA `ale_remap_opt` win.
+   !! ========================================================================
+   !! The one real lever (bit-identical to `ale_remap_step`): T and S ride on
+   !! the SAME h_old/target_h column, so the faithful path pays for the whole
+   !! PPM machinery (z_old/z_new interfaces, edge reconstruction, overlap sweep)
+   !! TWICE -- once per tracer. `ocean_remap_tracer_pair` builds the geometry
+   !! ONCE and consumes it for both tracers in a single per-column pass; the
+   !! only per-tracer work kept is the arithmetic that genuinely differs (the
+   !! two edge reconstructions + two integral accumulations), in the SAME ORDER
+   !! as `remap_column_ppm`, which is why the result is bit-identical.
+   !!
+   !! Two further waste-removal fusions (also bit-identical, pure register
+   !! hoists -- no CUDA-specific tricks, valid F2018, run under DATA=none):
+   !!   * PRE : total_h + h_ref + h_old snapshot + target_h in ONE 2-D pass.
+   !!           total_h and h_ref never leave registers (the faithful path
+   !!           round-trips remap_total_h/remap_h_ref through global memory).
+   !!           target_h keeps the faithful association ((Sh - eta) + eta)*dsig.
+   !!           This folds in the collapse/sig hoist: the target_h loop bounds
+   !!           are plain locals, not derived-type components.
+   !!   * POST: mass-budget delta + h_layer commit + bt_eta in ONE 2-D pass.
+   !! 10 do-concurrent launches -> 5.  Assumes the production regime the driver
+   !! exercises (VCOORD_ZSTAR, REMAP_PPM, tracers = {T, S} both with budgets);
+   !! that is exactly what ale_remap_step is doing at these configs.
+   subroutine ale_remap_step_opt(grid, vcoord, ms, bt_eta, bt_H_ref)
+      type(hgrid_t), intent(in) :: grid
+      type(ocean_vcoord_t), intent(inout) :: vcoord
+      type(multilayer_cgrid_state_t), intent(inout) :: ms
+      real(wp), intent(inout) :: bt_eta(:, :)
+      real(wp), intent(in) :: bt_H_ref(:, :)
+
+      integer :: m, nx, ny, nz, i, j, k, it, is
+      logical :: conserve_ke
+      real(wp) :: s, hr, ct
+
+      m = vcoord%remap_method
+      nx = grid%nx_total
+      ny = grid%ny_total
+      nz = ms%nz_ml
+      it = ms%idx_temperature
+      is = ms%idx_salinity
+
+      ! --- PRE (fused L1+L2+L3+L4): total_h, h_ref (registers only), h_old
+      !     snapshot (to global), target_h (zstar). Bit-identical to the four
+      !     faithful loops: s == remap_total_h, hr == remap_h_ref = s - eta,
+      !     ct == column_total = hr + eta, target_h = ct*dsig(k). ---
+      do concurrent(j=1:ny, i=1:nx) local(k, s, hr, ct)
+         s = 0.0_wp
+         do k = 1, nz
+            vcoord%remap_h_old(i, j, k) = ms%h_layer(i, j, k)
+            s = s + ms%h_layer(i, j, k)
+         end do
+         hr = s - bt_eta(i, j)
+         ct = hr + bt_eta(i, j)
+         do k = 1, nz
+            vcoord%target_h(i, j, k) = ct*vcoord%dsig(k)
+         end do
+      end do
+
+      ! --- Tracer remap: T + S share the column geometry (THE lever) ---
+      if (allocated(ms%tracers)) then
+         if (allocated(ms%tracers(it)%hTr) .and. allocated(ms%tracers(is)%hTr)) then
+            if (m == REMAP_PPM) then
+               call ocean_remap_tracer_pair(nx, ny, nz, vcoord%remap_h_old, vcoord%target_h, &
+                                            ms%tracers(it)%hTr, ms%tracers(is)%hTr, &
+                                            ms%heat_budget_remap, ms%salt_budget_remap)
+            else
+               ! non-PPM (rare): fall back to the faithful per-tracer path
+               call ocean_remap_tracer_field(nx, ny, nz, vcoord%remap_h_old, vcoord%target_h, &
+                                             ms%tracers(it)%hTr, m, budget=ms%heat_budget_remap)
+               call ocean_remap_tracer_field(nx, ny, nz, vcoord%remap_h_old, vcoord%target_h, &
+                                             ms%tracers(is)%hTr, m, budget=ms%salt_budget_remap)
+            end if
+         end if
+      end if
+
+      ! --- Face-velocity remap: no T/S-style twin to fuse, carried verbatim ---
+      conserve_ke = vcoord%remap_vel_conserve_ke
+      if (allocated(ms%u_face_x_layer) .and. allocated(ms%v_face_y_layer)) then
+         call remap_x_face_velocity(nx, ny, nz, vcoord%remap_h_old, vcoord%target_h, &
+                                    ms%u_face_x_layer, m, conserve_ke)
+         call remap_y_face_velocity(nx, ny, nz, vcoord%remap_h_old, vcoord%target_h, &
+                                    ms%v_face_y_layer, m, conserve_ke)
+      end if
+
+      ! --- POST (fused L9+L10): mass-budget delta, h_layer commit, bt_eta.
+      !     bt_eta sums h_layer (== target_h just committed), -bt_H_ref start,
+      !     same k order as the faithful L10 loop -> bit-identical. ---
+      do concurrent(j=1:ny, i=1:nx) local(k, s)
+         s = -bt_H_ref(i, j)
+         do k = 1, nz
+            ms%mass_budget_remap(i, j, k) = ms%mass_budget_remap(i, j, k) &
+                                            + (vcoord%target_h(i, j, k) - vcoord%remap_h_old(i, j, k))
+            ms%h_layer(i, j, k) = vcoord%target_h(i, j, k)
+            s = s + vcoord%target_h(i, j, k)
+         end do
+         bt_eta(i, j) = s
+      end do
+   end subroutine ale_remap_step_opt
+
+   !! Fused T+S tracer remap (PPM). The OUTER do-concurrent privatizes only the
+   !! six small per-column vectors (dz_old/dz_new/cT/cS/nT/nS); the heavy PPM
+   !! geometry+edge workspace lives in the callee `remap_column_ppm2`'s frame,
+   !! NOT the outer `local()` list. Keeping the outer private set small is what
+   !! makes this a WIN on nvfortran GPU codegen -- flattening every array into
+   !! the loop's `local()` clause spills them all to local memory and collapses
+   !! occupancy (this kernel is register/occupancy-bound). Bit-identical to two
+   !! faithful `ocean_remap_tracer_field` calls (verified max rel diff == 0).
+   pure subroutine ocean_remap_tracer_pair(nx, ny, nz, h_old, h_new, &
+                                           hTr_t, hTr_s, budget_t, budget_s)
+      integer, intent(in) :: nx, ny, nz
+      real(wp), intent(in) :: h_old(nx, ny, nz)
+      real(wp), intent(in) :: h_new(nx, ny, nz)
+      real(wp), intent(inout) :: hTr_t(nx, ny, nz)
+      real(wp), intent(inout) :: hTr_s(nx, ny, nz)
+      real(wp), intent(inout) :: budget_t(nx, ny, nz)
+      real(wp), intent(inout) :: budget_s(nx, ny, nz)
+      integer :: i, j, k
+      real(wp) :: dz_old(NZ_STACK_MAX), dz_new(NZ_STACK_MAX)
+      real(wp) :: cT(NZ_STACK_MAX), cS(NZ_STACK_MAX)
+      real(wp) :: nT(NZ_STACK_MAX), nS(NZ_STACK_MAX)
+      real(wp) :: a, b
+
+#ifdef ASYNC
+      !$acc kernels async(1)
+#endif
+      do concurrent(j=1:ny, i=1:nx) &
+         local(k, dz_old, dz_new, cT, cS, nT, nS, a, b)
+         do k = 1, nz
+            dz_old(k) = h_old(i, j, k)
+            dz_new(k) = h_new(i, j, k)
+            if (dz_old(k) > H_FLOOR) then
+               cT(k) = hTr_t(i, j, k)/dz_old(k)
+               cS(k) = hTr_s(i, j, k)/dz_old(k)
+            else
+               cT(k) = 0.0_wp
+               cS(k) = 0.0_wp
+            end if
+         end do
+         call remap_column_ppm2(nz, dz_old(1:nz), dz_new(1:nz), &
+                                cT(1:nz), cS(1:nz), nT(1:nz), nS(1:nz))
+         do k = 1, nz
+            a = nT(k)*dz_new(k)
+            b = nS(k)*dz_new(k)
+            budget_t(i, j, k) = budget_t(i, j, k) + (a - hTr_t(i, j, k))
+            budget_s(i, j, k) = budget_s(i, j, k) + (b - hTr_s(i, j, k))
+            hTr_t(i, j, k) = a
+            hTr_s(i, j, k) = b
+         end do
+      end do
+#ifdef ASYNC
+      !$acc end kernels
+#endif
+   end subroutine ocean_remap_tracer_pair
+
+   !! Two-tracer PPM column remap. Geometry (z_old/z_new + the overlap sweep) is
+   !! built ONCE and consumed by both tracers; each tracer's edge reconstruction
+   !! and integral accumulation are a line-for-line copy of `remap_column_ppm`'s
+   !! (kernel_remap.F90), in the SAME association order -> bit-identical to two
+   !! single-tracer calls. nz<3 columns fall back to two `remap_column_ppm`.
+   pure subroutine remap_column_ppm2(nz, dz_old, dz_new, qT_old, qS_old, qT_new, qS_new)
+      DC_ROUTINE_SEQ
+      integer, intent(in) :: nz
+      real(wp), intent(in) :: dz_old(nz), dz_new(nz), qT_old(nz), qS_old(nz)
+      real(wp), intent(out) :: qT_new(nz), qS_new(nz)
+      real(wp) :: z_old(0:NZ_STACK_MAX), z_new(0:NZ_STACK_MAX)
+      real(wp) :: LT(NZ_STACK_MAX), RT(NZ_STACK_MAX), S6T(NZ_STACK_MAX)
+      real(wp) :: LS(NZ_STACK_MAX), RS(NZ_STACK_MAX), S6S(NZ_STACK_MAX)
+      real(wp) :: z_lo, z_hi, overlap, iT, iS, xi_lo, xi_hi, d1, d2, d3
+      integer :: k, ko, ko_start
+
+      if (nz < 3) then
+         call remap_column_ppm(nz, dz_old, dz_new, qT_old, qT_new)
+         call remap_column_ppm(nz, dz_old, dz_new, qS_old, qS_new)
+         return
+      end if
+
+      z_old(0) = 0.0_wp
+      z_new(0) = 0.0_wp
+      do k = 1, nz
+         z_old(k) = z_old(k - 1) + dz_old(k)
+         z_new(k) = z_new(k - 1) + dz_new(k)
+      end do
+
+      call ppm_edges(nz, qT_old, LT, RT, S6T)
+      call ppm_edges(nz, qS_old, LS, RS, S6S)
+
+      ko_start = 1
+      do k = 1, nz
+         if (dz_new(k) <= 0.0_wp) then
+            qT_new(k) = 0.0_wp
+            qS_new(k) = 0.0_wp
+            cycle
+         end if
+         iT = 0.0_wp
+         iS = 0.0_wp
+         do ko = ko_start, nz
+            z_lo = max(z_new(k - 1), z_old(ko - 1))
+            z_hi = min(z_new(k), z_old(ko))
+            overlap = z_hi - z_lo
+            if (overlap <= 0.0_wp) then
+               if (z_old(ko) > z_new(k)) exit
+               cycle
+            end if
+            if (dz_old(ko) > 0.0_wp) then
+               xi_lo = (z_lo - z_old(ko - 1))/dz_old(ko)
+               xi_hi = (z_hi - z_old(ko - 1))/dz_old(ko)
+               d1 = xi_hi - xi_lo
+               d2 = 0.5_wp*(xi_hi*xi_hi - xi_lo*xi_lo)
+               ! d3 is the RAW cube difference; the `*q6/3` division is kept in
+               ! production's association order (pre-dividing re-rounds ~1 ulp).
+               d3 = xi_hi*xi_hi*xi_hi - xi_lo*xi_lo*xi_lo
+               iT = iT + dz_old(ko)*(d1*LT(ko) + d2*(RT(ko) - LT(ko) + S6T(ko)) - d3*S6T(ko)/3.0_wp)
+               iS = iS + dz_old(ko)*(d1*LS(ko) + d2*(RS(ko) - LS(ko) + S6S(ko)) - d3*S6S(ko)/3.0_wp)
+            else
+               iT = iT + qT_old(ko)*overlap
+               iS = iS + qS_old(ko)*overlap
+            end if
+            if (z_old(ko) <= z_new(k)) ko_start = ko
+         end do
+         qT_new(k) = iT/dz_new(k)
+         qS_new(k) = iS/dz_new(k)
+      end do
+   end subroutine remap_column_ppm2
+
+   !! PPM edge reconstruction: steps 1+2 of `remap_column_ppm` (4th-order edge
+   !! interp + Colella-Woodward monotonicity limiting), producing q_L/q_R/q6.
+   !! Transcribed op-for-op from kernel_remap.F90 (the two dead dq_l/dq_r reads
+   !! in the faithful edge loop are elided -- they never touch q_L/q_R/q6).
+   pure subroutine ppm_edges(nz, q_old, q_L, q_R, q6)
+      DC_ROUTINE_SEQ
+      integer, intent(in) :: nz
+      real(wp), intent(in) :: q_old(nz)
+      real(wp), intent(out) :: q_L(nz), q_R(nz), q6(nz)
+      real(wp) :: edge, dq, dq_l, dq_r, q_min, q_max
+      integer :: k
+
+      q_L(1) = q_old(1)
+      q_R(nz) = q_old(nz)
+      q_R(1) = 0.5_wp*(q_old(1) + q_old(2))
+      q_L(nz) = 0.5_wp*(q_old(nz - 1) + q_old(nz))
+      do k = 2, nz - 1
+         edge = 0.5_wp*(q_old(k) + q_old(k + 1))
+         if (k + 2 <= nz) then
+            edge = (7.0_wp/12.0_wp)*(q_old(k) + q_old(k + 1)) &
+                   - (1.0_wp/12.0_wp)*(q_old(k - 1) + q_old(k + 2))
+         end if
+         q_R(k) = edge
+         q_L(k + 1) = edge
+      end do
+      if (nz >= 3) q_L(2) = q_R(1)
+
+      do k = 1, nz
+         q_min = q_old(k)
+         q_max = q_old(k)
+         if (k > 1) then
+            q_min = min(q_min, q_old(k - 1))
+            q_max = max(q_max, q_old(k - 1))
+         end if
+         if (k < nz) then
+            q_min = min(q_min, q_old(k + 1))
+            q_max = max(q_max, q_old(k + 1))
+         end if
+         q_L(k) = max(q_min, min(q_max, q_L(k)))
+         q_R(k) = max(q_min, min(q_max, q_R(k)))
+         dq = q_R(k) - q_L(k)
+         dq_l = q_old(k) - q_L(k)
+         dq_r = q_R(k) - q_old(k)
+         if (dq_l*dq_r <= 0.0_wp) then
+            q_L(k) = q_old(k)
+            q_R(k) = q_old(k)
+         else
+            q6(k) = 6.0_wp*q_old(k) - 3.0_wp*(q_L(k) + q_R(k))
+            if (abs(q6(k)) > abs(dq)) then
+               if (q6(k)*dq > 0.0_wp) then
+                  q_L(k) = 3.0_wp*q_old(k) - 2.0_wp*q_R(k)
+               else
+                  q_R(k) = 3.0_wp*q_old(k) - 2.0_wp*q_L(k)
+               end if
+            end if
+         end if
+         q6(k) = 6.0_wp*q_old(k) - 3.0_wp*(q_L(k) + q_R(k))
+      end do
+   end subroutine ppm_edges
 
    !! zstar branch of `ocean_vcoord_compute_target_h_impl`. The assumed-shape
    !! dummies and the `associate` block are production's, kept verbatim.

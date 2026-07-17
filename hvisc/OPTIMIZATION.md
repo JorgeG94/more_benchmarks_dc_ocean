@@ -85,3 +85,111 @@ codegen-comparison baseline. `ab_main.cu` reuses `drivers/cpp_main.cu`'s init,
 runs faithful → `du0/dv0` and optimized → `du1/dv1`, diffs both fields
 field-relative, and times both with CUDA events (min over windows).
 ```
+
+## DC (do concurrent) optimization
+
+The same win, ported to portable Fortran `do concurrent` — no CUDA, no
+shared-memory / launch-bounds tricks, builds and runs `DATA=none` on the CPU
+unchanged.
+
+**Result (V100, 473×297×30, `-stdpar=gpu`):**
+
+| variant | ms/rep |
+|---|---|
+| faithful (two-pass: `smag` → ah_face → `face`) | 1.823 |
+| **fused (single pass, `hvisc_compute_fused`)** | **1.362** |
+| **speedup** | **1.34×** |
+
+**max rel diff = 0 (bit-identical, both `du_visc` and `dv_visc`).**
+CPU `DATA=none` (60×40×8): identical numbers, 1.85× — smaller grids gain more,
+exactly as the CUDA side (launch/traffic overhead is a larger fraction).
+
+### The transform — and why it is bit-identically fusable
+
+The DC side ships as two routines (`hvisc_compute_smag` writes `ahx/ahy`, then
+`hvisc_compute_face` reads them into `du/dv`), so the CUDA "12 kernels" here is
+**12 `do concurrent` loops** (6 in smag: interior + 2 halo per face; 6 in face:
+interior + 2 wall per face). `hvisc_compute_fused` collapses them to **2 loops**
+(one per face direction), computing `ah` in a register and feeding it straight
+into the Laplacian — the `ahx/ahy` face arrays **never touch memory**.
+
+The dependency the fusion had to clear: `hvisc_compute_face` reads `ah_face_x`
+at *neighbouring* faces? **No.** It reads `ah_face_x(i,j,k)` at exactly the
+`(i,j,k)` it writes `du_visc`, and the du-interior range (`j=2:ny-1, i=2:nx`) is
+**identical** to the smag u-face interior write range. So every consumed `ah` is
+the one produced at the same cell — **no inline neighbour recompute is needed**,
+and the ah halo/reuse writes (`ahx(i,1)`, `ahx(1,j)`, …) are **dead code** for
+the du/dv output and are dropped. (Same for the v-face.) Because each per-cell
+expression is reproduced in the identical operand order and grouping, the
+compiler contracts FMAs the same way → `max|diff| == 0`, not merely `< 1e-12`.
+Boundary faces write `0.0` inline, folding the 4 wall-zeroing loops in for free.
+
+Because no thread recomputes a neighbour's `ah`, the arithmetic work is *also*
+unchanged (unlike a fusion that duplicates the strain at shared faces) — the
+payoff is purely deleted DRAM traffic + deleted launches, matching the CUDA
+finding that the closure is memory-bound at these sizes.
+
+### Reproduce
+
+```bash
+cd hvisc
+make dcab DATA=acc
+# ALWAYS through the shared GPU lock (never run ./dc_ab_acc directly):
+bash ../tmp_local_artifacts/gpu_run.sh hvisc-dcab ./dc_ab_acc 473 297 30 200 10
+# portability (no CUDA, CPU cores):
+make dcab DATA=none && ./dc_ab_none 60 40 8 20 3
+```
+
+`drivers/dc_ab.F90` shares this binary's libm across both paths, so `du/dv` are
+compared directly in memory — no reference dump, no cross-language libm trap.
+The faithful `hvisc_compute_smag`/`hvisc_compute_face` stay untouched as the
+baseline; `hvisc_compute_fused` is the new public routine.
+
+## Head-to-head: opt-CUDA vs opt-DC (shared host_data driver)
+
+The optimized DC (`hvisc_compute_fused`) and optimized CUDA (`hvisc_opt_launch`)
+each had their own harness — DC timed in the `dc_ab` Fortran binary, CUDA in the
+`ab` nvcc binary — so the earlier "opt-DC 1.362 vs opt-CUDA 1.438" comparison
+carried a two-harness caveat (different clocks, different init, different
+processes). `drivers/cmp_main.F90` removes it: **both endpoints run in ONE
+binary, on ONE set of device allocations**, timed over identical reps with the
+same `system_clock`. The DC routine writes the device `du/dv`; the CUDA launcher
+is handed those *same* device pointers via `!$acc host_data use_device` (the
+`drivers/hvisc_bridge.F90` bridge — a `bind(C)` interface, built **without**
+`-cuda`, `-cuda` link-only), so there is one truth and the two outputs are
+diffed in place.
+
+**Result (V100, 473×297×30, 200 reps + 10 warm, `-stdpar=gpu`), 3 runs:**
+
+| endpoint | ms/rep |
+|---|---|
+| **opt-DC** (`hvisc_compute_fused`) | **1.363 – 1.371** |
+| opt-CUDA (`hvisc_opt_launch`, OPTVER=2) | 1.416 – 1.429 |
+| **ratio** | **opt-DC faster, ~1.04×** |
+
+**agreement: max rel diff = 1.31e-14** (both `du`/`dv`; max\|diff\| 8.6e-23) —
+well under the 1e-12 bar. The tiny nonzero (vs the DC-vs-DC `max|diff| == 0`) is
+FMA-contraction: nvcc and nvfortran group the two-`sqrt` strain the same way but
+the compilers' codegen contracts a hair differently. Both sum to the identical
+`du = -5.784248e-05`, `dv = -1.182050e-04`.
+
+**Verdict: the head-to-head CONFIRMS the earlier split-harness reading — opt-DC
+beats faithful hand-optimized CUDA on this kernel, by ~4%.** `do concurrent`
+loses nothing to CUDA here; the fused single-launch closure is memory-bound, and
+nvfortran's `-stdpar=gpu` codegen for the two fused loops is marginally tighter
+than the OPTVER=2 merged kernel. There is no CUDA rewrite dividend to collect.
+
+### Reproduce
+
+```bash
+cd hvisc
+make cmp                       # Fortran (no -cuda) + nvcc opt_kernel.cu, link -cuda
+# ALWAYS through the shared GPU lock (never run ./cmp_acc directly):
+bash ../tmp_local_artifacts/gpu_run.sh hvisc-cmp ./cmp_acc 473 297 30 200 10
+# or: make run-cmp   (wraps the lock)
+```
+
+The kernel is stateless per rep (reads `u/v` + geometry, writes `du/dv`), so
+between the two timed runs the driver only snapshots opt-DC's result to host;
+opt-CUDA overwrites every device cell (interior computed, walls → 0), so no
+device reset is needed.

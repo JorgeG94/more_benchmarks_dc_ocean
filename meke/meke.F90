@@ -45,6 +45,7 @@ module meke
    private
 
    public :: meke_step_ext
+   public :: meke_step_ext_fused
    public :: meke_zero_2d, meke_stage_rd, meke_stage_sn, meke_mass
    public :: meke_length_scales, meke_source, meke_drag
    public :: meke_kh_closure, meke_ku_closure, meke_lateral
@@ -119,6 +120,198 @@ contains
       call meke_ku_closure(nx, ny, m%backscatter, m%visc_coeff_ku, &
                            m%meke, m%le, m%ku)
    end subroutine meke_step_ext
+
+   !! FUSED optimization of meke_step_ext (DC portable analogue of opt_kernel.cu).
+   !! Same per-cell arithmetic and evaluation order as the faithful step, but the
+   !! 16 same-bounds `do concurrent` loops are collapsed to 6 by fusing loops that
+   !! share iteration bounds AND have no cross-loop halo (neighbour) dependency:
+   !!
+   !!   PASS A  (nx,ny)   : rd_ws-zero + mass + length_scales + ke_diss stage
+   !!                       + source + drag(1)   [faithful loops 1,4,5,6,7,8]
+   !!   u-flux  (nx+1,ny) : zero + interior fill folded into one guarded loop  [9,10]
+   !!   v-flux  (nx,ny+1) : zero + interior fill folded into one guarded loop  [11,12]
+   !!   PASS B  (nx,ny)   : flux-divergence + drag(2) + kh + ku closures  [13,14,15,16]
+   !!   + the two sn-face zeroings [2,3] kept separate (different bounds).
+   !!
+   !! Fusion is bit-identical: every fused member touches only cell (i,j) of the
+   !! arrays an earlier member wrote; the flux stencil reads meke/mass_ws/kh_diff
+   !! that were finalised in a PRIOR loop (across the DC barrier), and the
+   !! divergence reads uflux/vflux from their own prior loop -- no read-after-write
+   !! on a neighbour an earlier fused loop just wrote. The flux loops are NOT
+   !! folded into pass B (that would need meke double-buffering + a kh_diff R/W
+   !! hazard -- exactly the over-fusion the CUDA path handled with a scratch and a
+   !! khmeke_fac caveat; kept portable & unconditionally exact here instead).
+   !!
+   !! Specialised to the gabight_sph_meke_v100 config (kh>=0, k4<0, khmeke_fac=0,
+   !! have_rho=T, alpha_*=0). Any other config falls back to the faithful step, so
+   !! the result is bit-identical to meke_step_ext for ALL inputs.
+   subroutine meke_step_ext_fused(nx, ny, nz, m, metrics, gm, ms, dt, ke_diss_ext)
+      integer, intent(in) :: nx, ny, nz
+      type(ocean_meke_t), intent(inout) :: m
+      type(ocean_metrics_t), intent(in) :: metrics
+      type(ocean_gm_t), intent(in) :: gm
+      type(multilayer_cgrid_state_t), intent(in) :: ms
+      real(wp), intent(in) :: dt
+      real(wp), intent(in) :: ke_diss_ext(nx, ny)
+      real(wp) :: sdt, sdt_damp, damp_step, cd2
+      integer :: i, j, k
+      real(wp) :: mass, dsum, hk, rd, lgrid, ldeform, lfrict, ratio, bf2, tf2
+      real(wp) :: ueddy, sn, beta, inv_l, s, e, drag_rate, damp_rate
+      real(wp) :: kh_u, kh_v, geo, hm, inv_max, mke
+
+      ! Not the fused-supported config -> exact faithful path (bit-identical).
+      if (m%k4 >= 0.0_wp .or. m%kh < 0.0_wp .or. m%khmeke_fac /= 0.0_wp) then
+         call meke_step_ext(nx, ny, nz, m, metrics, gm, ms, dt, ke_diss_ext)
+         return
+      end if
+
+      sdt = dt*m%dtscale
+      damp_step = 1.0_wp
+      if (m%kh >= 0.0_wp .or. m%k4 >= 0.0_wp) damp_step = 0.5_wp
+      sdt_damp = sdt*damp_step
+      cd2 = m%cdrag*m%cdrag
+
+      ! ---- sn-face zeroings (loops 2,3): different bounds, kept separate. -----
+      call meke_zero_2d(nx + 1, ny, m%sn_u_ws)
+      call meke_zero_2d(nx, ny + 1, m%sn_v_ws)
+
+      ! ---- PASS A (loops 1,4,5,6,7,8): one loop over cell centres. -----------
+      do concurrent(j=1:ny, i=1:nx) &
+         local(k, mass, dsum, hk, rd, lgrid, ldeform, lfrict, ratio, bf2, tf2, &
+               ueddy, sn, beta, inv_l, s, e, drag_rate, damp_rate)
+         ! loop 1: rd_ws zero (have_ws=F)
+         m%rd_ws(i, j) = 0.0_wp
+         rd = m%rd_ws(i, j)
+         ! loop 6: stage ke_diss
+         m%ke_diss_ws(i, j) = ke_diss_ext(i, j)
+         ! loop 4: column mass / depth / inverse mass (have_rho=T)
+         mass = 0.0_wp
+         dsum = 0.0_wp
+         do k = 1, nz
+            hk = max(ms%h_layer(i, j, k), H_VANISHED)
+            mass = mass + ms%rho_layer(i, j, k)*hk
+            dsum = dsum + ms%h_layer(i, j, k)
+         end do
+         m%depth_tot(i, j) = dsum
+         m%mass_ws(i, j) = mass
+         if (mass > 0.0_wp) then
+            m%i_mass(i, j) = 1.0_wp/mass
+         else
+            m%i_mass(i, j) = 0.0_wp
+         end if
+         ! loop 5: structure factors + mixing length
+         lgrid = sqrt(max(metrics%areaT(i, j), 0.0_wp))
+         ldeform = lgrid*rd
+         lfrict = 0.0_wp
+         if (m%cdrag > 0.0_wp) lfrict = dsum/m%cdrag
+         bf2 = m%cd_scale*m%cd_scale
+         if (lfrict*m%cb > 0.0_wp) then
+            ratio = ldeform/lfrict
+            bf2 = bf2 + 1.0_wp/(1.0_wp + m%cb*ratio)**0.8_wp
+         end if
+         bf2 = max(bf2, m%min_gamma2)
+         m%bottom_fac2(i, j) = bf2
+         tf2 = 1.0_wp
+         if (lfrict*m%ct > 0.0_wp) then
+            ratio = ldeform/lfrict
+            tf2 = 1.0_wp/(1.0_wp + m%ct*ratio)**0.25_wp
+         end if
+         tf2 = max(tf2, m%min_gamma2)
+         m%barotr_fac2(i, j) = tf2
+         ueddy = sqrt(2.0_wp*max(0.0_wp, tf2*m%meke(i, j)))
+         beta = 0.0_wp
+         if (i > 1 .and. i < nx) then
+            beta = beta + (0.5_wp*(m%f_centre(i + 1, j) - m%f_centre(i - 1, j))*metrics%idxT(i, j))**2
+         end if
+         if (j > 1 .and. j < ny) then
+            beta = beta + (0.5_wp*(m%f_centre(i, j + 1) - m%f_centre(i, j - 1))*metrics%idyT(i, j))**2
+         end if
+         beta = sqrt(beta)
+         sn = 0.0_wp
+         if (m%alpha_eady > 0.0_wp) sn = 0.25_wp*((m%sn_u_ws(i, j) + m%sn_u_ws(i + 1, j)) + &
+                                                  (m%sn_v_ws(i, j) + m%sn_v_ws(i, j + 1)))
+         inv_l = meke_inv_lmix(ueddy, sn, beta, metrics%areaT(i, j), rd, &
+                               dsum, m%cdrag, &
+                               m%alpha_deform, m%alpha_rhines, m%alpha_eady, &
+                               m%alpha_frict, m%alpha_grid)
+         if (inv_l > 0.0_wp) then
+            m%le(i, j) = 1.0_wp/inv_l
+         else
+            m%le(i, j) = 0.0_wp
+         end if
+         ! loop 7: source + explicit bump
+         s = m%bgsrc
+         if (m%gmcoeff >= 0.0_wp) s = s + m%gmcoeff*m%i_mass(i, j)*gm%gm_src(i, j)
+         if (m%frcoeff >= 0.0_wp) s = s - m%frcoeff*m%i_mass(i, j)*m%ke_diss_ws(i, j)
+         m%src(i, j) = s
+         e = m%meke(i, j) + sdt*s
+         ! loop 8: implicit drag (half-step 1)
+         drag_rate = m%i_mass(i, j)*sqrt(cd2*(max(0.0_wp, 2.0_wp*bf2*e) &
+                                              + m%u_bbl2(i, j) + m%uscale*m%uscale))
+         damp_rate = m%damping + drag_rate*bf2
+         if (e < 0.0_wp) damp_rate = 0.0_wp
+         m%meke(i, j) = e/(1.0_wp + sdt_damp*damp_rate)
+      end do
+
+      ! ---- u-flux (loops 9,10 fused): zero + interior in one guarded loop ----
+      do concurrent(j=1:ny, i=1:nx + 1) local(kh_u, geo, hm, inv_max)
+         if (i >= 2 .and. i <= nx) then
+            geo = metrics%dy_cu(i, j)*metrics%idxCu(i, j)
+            kh_u = max(0.0_wp, m%kh) + m%khmeke_fac*0.5_wp*(m%kh_diff(i - 1, j) + m%kh_diff(i, j))
+            inv_max = 2.0_wp*sdt*(geo*max(metrics%iareaT(i - 1, j), metrics%iareaT(i, j)))
+            if (kh_u*inv_max > 0.25_wp) kh_u = 0.25_wp/inv_max
+            hm = 2.0_wp*m%mass_ws(i - 1, j)*m%mass_ws(i, j)/ &
+                 ((m%mass_ws(i - 1, j) + m%mass_ws(i, j)) + MASS_NEGLECT)
+            m%uflux(i, j) = (kh_u*geo)*hm*(m%meke(i - 1, j) - m%meke(i, j))
+         else
+            m%uflux(i, j) = 0.0_wp
+         end if
+      end do
+
+      ! ---- v-flux (loops 11,12 fused) ----------------------------------------
+      do concurrent(j=1:ny + 1, i=1:nx) local(kh_v, geo, hm, inv_max)
+         if (j >= 2 .and. j <= ny) then
+            geo = metrics%dx_cv(i, j)*metrics%idyCv(i, j)
+            kh_v = max(0.0_wp, m%kh) + m%khmeke_fac*0.5_wp*(m%kh_diff(i, j - 1) + m%kh_diff(i, j))
+            inv_max = 2.0_wp*sdt*(geo*max(metrics%iareaT(i, j - 1), metrics%iareaT(i, j)))
+            if (kh_v*inv_max > 0.25_wp) kh_v = 0.25_wp/inv_max
+            hm = 2.0_wp*m%mass_ws(i, j - 1)*m%mass_ws(i, j)/ &
+                 ((m%mass_ws(i, j - 1) + m%mass_ws(i, j)) + MASS_NEGLECT)
+            m%vflux(i, j) = (kh_v*geo)*hm*(m%meke(i, j - 1) - m%meke(i, j))
+         else
+            m%vflux(i, j) = 0.0_wp
+         end if
+      end do
+
+      ! ---- PASS B (loops 13,14,15,16): divergence + drag(2) + kh + ku ---------
+      do concurrent(j=1:ny, i=1:nx) local(mke, e, drag_rate, damp_rate, ueddy)
+         ! loop 13: conservative flux divergence
+         mke = sdt*(metrics%iareaT(i, j)*m%i_mass(i, j))* &
+               ((m%uflux(i, j) - m%uflux(i + 1, j)) + (m%vflux(i, j) - m%vflux(i, j + 1)))
+         e = m%meke(i, j) + mke
+         ! loop 14: implicit drag (half-step 2)
+         drag_rate = m%i_mass(i, j)*sqrt(cd2*(max(0.0_wp, 2.0_wp*m%bottom_fac2(i, j)*e) &
+                                              + m%u_bbl2(i, j) + m%uscale*m%uscale))
+         damp_rate = m%damping + drag_rate*m%bottom_fac2(i, j)
+         if (e < 0.0_wp) damp_rate = 0.0_wp
+         e = e/(1.0_wp + sdt_damp*damp_rate)
+         m%meke(i, j) = e
+         ! loop 15: kh closure
+         if (m%khcoeff > 0.0_wp) then
+            ueddy = sqrt(2.0_wp*max(0.0_wp, m%barotr_fac2(i, j)*e))
+            m%kh_diff(i, j) = m%khcoeff*ueddy*m%le(i, j)
+         else
+            m%kh_diff(i, j) = 0.0_wp
+         end if
+         ! loop 16: ku closure
+         if (m%backscatter .and. m%visc_coeff_ku /= 0.0_wp) then
+            ueddy = sqrt(2.0_wp*max(0.0_wp, e))
+            m%ku(i, j) = m%visc_coeff_ku*ueddy*m%le(i, j)
+         else
+            m%ku(i, j) = 0.0_wp
+         end if
+      end do
+   end subroutine meke_step_ext_fused
 
    pure subroutine meke_zero_2d(n1, n2, a)
       !! Zero a device-resident 2D workspace (absent-source fallback).

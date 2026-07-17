@@ -42,6 +42,13 @@ DCBIN  := dc_$(DATA)
 DCBLD  := build/dc_$(DATA)
 DCOBJS := $(addprefix $(DCBLD)/,$(notdir $(DC_SRCS:.F90=.o)))
 
+# ---- A/B build mode: same compute, dc_ab driver (faithful vs hoist) --------
+DCAB_SRCS  := constants.F90 grid.F90 ocean_metrics.F90 multilayer_cgrid_state.F90 \
+              ocean_boundary_types.F90 ocean_eos.F90 ocean_redi.F90 drivers/dc_ab.F90
+DCABBIN  := dc_ab_$(DATA)
+DCABBLD  := build/dc_ab_$(DATA)
+DCABOBJS := $(addprefix $(DCABBLD)/,$(notdir $(DCAB_SRCS:.F90=.o)))
+
 # ---- native C++ build mode: BACKEND selects the GPU runtime ----------------
 CU_SRCS := redi_kernel.cu drivers/cpp_main.cu
 CUFLAGS := -O3 $(GPU_ARCHFLAG) -I../common --compiler-options -fPIC $(DEFS)
@@ -55,13 +62,38 @@ CUOBJS  := $(addprefix $(CPPBLD)/,$(notdir $(CU_SRCS:.cu=.o)))
 vpath %.F90 . drivers
 vpath %.cu  . drivers
 
-.PHONY: dc cpp run-dc run-cpp verify clean
+# ---- cmp build mode: SHARED single-binary head-to-head --------------------
+# opt-DC (redi_apply_flux_hoist) vs opt-CUDA (redi_opt_launch) on the SAME
+# device arrays via `!$acc host_data use_device`. One binary, one truth --
+# removes the OpenACC-vs-native-cudaMalloc two-harness caveat.
+# NZSTACK / ARCH / GPU_ARCHFLAG flow in from ../config.mk.
+NZSTACK ?= 128
+# Fortran (modules + bridge + driver): -acc=gpu, NO -cuda.
+CMP_FFLAGS  := $(FFLAGS_BASE) -I../common -stdpar=gpu -acc=gpu \
+               -gpu=$(ARCH),mem:separate -gpu=tripcount:host \
+               -DDC_DATA_ACC -DMODEL_NZ_STACK_MAX=$(NZSTACK)
+# CUDA (opt_kernel.cu): same -D flags redi's ab build used.
+CMP_CUFLAGS := -O3 $(GPU_ARCHFLAG) -I../common -I. --compiler-options -fPIC \
+               -DMODEL_NZ_STACK_MAX=$(NZSTACK)
+# -cuda is LINK-ONLY: it also flips nvfortran into CUDA-Fortran mode, which
+# type-checks device attributes and rejects the host_data bridge with
+# NVFORTRAN-S-0528 device-attribute mismatch. It appears ONLY here.
+CMP_LDFLAGS := -stdpar=gpu -acc=gpu -gpu=$(ARCH),mem:separate -cuda
+CMPBLD   := build/cmp
+CMP_FSRC := constants.F90 grid.F90 ocean_metrics.F90 multilayer_cgrid_state.F90 \
+            ocean_boundary_types.F90 ocean_eos.F90 ocean_redi.F90 \
+            drivers/redi_bridge.F90 drivers/cmp_main.F90
+CMP_FOBJ := $(addprefix $(CMPBLD)/,$(notdir $(CMP_FSRC:.F90=.o)))
+
+.PHONY: dc dcab cpp cmp run-dc run-cpp run-dcab run-cmp verify clean
 .NOTPARALLEL:            # honour the DC_SRCS dependency order
 
 dc: $(DCBIN)
+dcab: $(DCABBIN)
 cpp: $(CPPBIN)
+cmp: cmp_acc
 
-$(DCBLD) $(CPPBLD):
+$(DCBLD) $(DCABBLD) $(CPPBLD):
 	@mkdir -p $@
 
 $(DCBLD)/%.o: %.F90 ../common/directives.h | $(DCBLD)
@@ -70,17 +102,41 @@ $(DCBLD)/%.o: %.F90 ../common/directives.h | $(DCBLD)
 $(DCBIN): $(DCOBJS)
 	$(FC) $(BASE_FFLAGS) $(DC_MODE_FLAGS) $(DCOBJS) -o $@
 
+$(DCABBLD)/%.o: %.F90 ../common/directives.h | $(DCABBLD)
+	$(FC) $(BASE_FFLAGS) $(DC_MODE_FLAGS) $(MODFLAG) $(DCABBLD) -c $< -o $@
+
+$(DCABBIN): $(DCABOBJS)
+	$(FC) $(BASE_FFLAGS) $(DC_MODE_FLAGS) $(DCABOBJS) -o $@
+
 $(CPPBLD)/%.o: %.cu ../common/gpu_rt.h | $(CPPBLD)
 	$(NVCC) $(CUFLAGS) -c $< -o $@
 
 $(CPPBIN): $(CUOBJS)
 	$(NVCC) $(CUOBJS) -o $@ $(GPU_ARCHFLAG)
 
+# ---- cmp build rules ------------------------------------------------------
+$(CMPBLD):
+	@mkdir -p $@
+
+$(CMPBLD)/%.o: %.F90 ../common/directives.h | $(CMPBLD)
+	$(FC) $(CMP_FFLAGS) $(MODFLAG) $(CMPBLD) -c $< -o $@
+
+$(CMPBLD)/opt_kernel.o: opt_kernel.cu ../common/gpu_rt.h | $(CMPBLD)
+	$(NVCC) $(CMP_CUFLAGS) -c $< -o $@
+
+cmp_acc: $(CMP_FOBJ) $(CMPBLD)/opt_kernel.o
+	$(FC) $(CMP_FFLAGS) $(CMP_FOBJ) $(CMPBLD)/opt_kernel.o -o $@ $(CMP_LDFLAGS)
+
 ARGS ?= 473 297 30 8 2
 run-dc: dc
 	@./$(DCBIN) $(ARGS)
+run-dcab: dcab
+	@./$(DCABBIN) $(ARGS)
 run-cpp: cpp
 	@./$(CPPBIN) $(ARGS)
+# GPU DISCIPLINE: every GPU run goes THROUGH THE LOCK (shared V100).
+run-cmp: cmp
+	@../tmp_local_artifacts/gpu_run.sh redi-cmp ./cmp_acc $(ARGS)
 
 # Prove the macro'd data layer is numerically inert: OpenACC (GPU) writes a
 # reference; the CPU build recomputes and cross-checks it to FMA level.
@@ -91,4 +147,4 @@ verify:
 	@DC_REF=redi_ref.bin  ./dc_none $(ARGS)
 
 clean:
-	@rm -rf build dc_acc dc_omp dc_none cpp_cuda cpp_hip redi_ref.bin *.mod
+	@rm -rf build dc_acc dc_omp dc_none dc_ab_acc dc_ab_omp dc_ab_none cpp_cuda cpp_hip cmp_acc redi_ref.bin *.mod

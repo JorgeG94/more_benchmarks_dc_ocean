@@ -58,6 +58,11 @@ module ocean_redi
    public :: ocean_redi_t
    public :: redi_calc_coeffs
    public :: redi_apply_flux
+   ! OPTIMIZED A/B variant (portable-Fortran analogue of the CUDA `kOptApplyFlux`
+   ! precompute hoist): bit-identical to redi_apply_flux, reconstructs each
+   ! cell's centre tracer column ONCE instead of 4x. Added ALONGSIDE the faithful
+   ! path (which is byte-identical to production) for the dc_ab driver.
+   public :: redi_apply_flux_hoist
 
    ! =====================================================================
    ! R2 — neutral-diffusion slot + two-phase GPU flux kernel
@@ -1174,4 +1179,272 @@ contains
          end do
       end do
    end subroutine redi_apply_flux_impl
+
+   ! =====================================================================
+   ! OPTIMIZED apply-flux — precompute hoist (portable-Fortran analogue of
+   ! the CUDA `kOptApplyFlux`). Bit-identical to redi_apply_flux.
+   !
+   ! The faithful path visits every T-cell and calls redi_face_flux on each
+   ! of its four bounding faces (W/E/S/N). redi_face_flux reconstructs BOTH
+   ! its left and right tracer column from scratch -> 8 column rebuilds per
+   ! cell, but only 5 distinct columns exist: the centre (i,j) is rebuilt 4x
+   ! (it is a column of ALL four faces), each of the 4 neighbours once.
+   !
+   ! redi_cell_flux reconstructs the centre column ONCE per cell into frame
+   ! locals and reuses it across all four faces via redi_face_flux_hoist,
+   ! which rebuilds only the distinct neighbour column -> 8 rebuilds -> 5.
+   ! redi_tracer_column is a deterministic pure function of the column data,
+   ! so computing the centre once vs four times yields the SAME BITS; the
+   ! W,E,S,N face order and the ks=1..ns-1 accumulation order into dTr are
+   ! preserved exactly. Hence bit-exact, not merely FMA-level.
+   ! =====================================================================
+   subroutine redi_apply_flux_hoist(grid, metrics, this, ms, dt, khtr_u_ext, khtr_v_ext, bc)
+      !! Optimized public Phase-B entry. Identical contract to redi_apply_flux;
+      !! see that routine for argument semantics. Only the per-cell column
+      !! reconstruction is hoisted (5 rebuilds/cell instead of 8).
+      type(hgrid_t), intent(in) :: grid
+      type(ocean_metrics_t), intent(in) :: metrics
+      type(ocean_redi_t), intent(inout) :: this
+      type(multilayer_cgrid_state_t), intent(inout) :: ms
+      real(wp), intent(in) :: dt
+      real(wp), intent(in), optional :: khtr_u_ext(:, :)
+      real(wp), intent(in), optional :: khtr_v_ext(:, :)
+      type(ocean_bc_state_t), intent(in), optional :: bc
+      integer :: nx, ny, nz, it
+      integer :: nghost, nxp, nyp
+      logical :: use_ext, wall_w, wall_e, wall_s, wall_n
+
+      if (.not. this%is_init) return
+      if (.not. this%enable) return
+      if (.not. allocated(ms%h_layer)) return
+      if (.not. allocated(ms%tracers)) return
+
+      nx = grid%nx_total
+      ny = grid%ny_total
+      nz = ms%nz_ml
+      if (this%nz_ml /= nz) return
+      nghost = grid%nghost
+      nxp = grid%nx_phys
+      nyp = grid%ny_phys
+      wall_w = .true.
+      wall_e = .true.
+      wall_s = .true.
+      wall_n = .true.
+      if (present(bc)) then
+         wall_w = (bc%west%bc_type == OBC_WALL)
+         wall_e = (bc%east%bc_type == OBC_WALL)
+         wall_s = (bc%south%bc_type == OBC_WALL)
+         wall_n = (bc%north%bc_type == OBC_WALL)
+      end if
+
+      use_ext = present(khtr_u_ext) .and. present(khtr_v_ext)
+      if (.not. use_ext .and. this%khtr <= 0.0_wp) return
+
+      if (use_ext) then
+         call redi_face_copy(nx + 1, ny, khtr_u_ext, this%khtr_u)
+         call redi_face_copy(nx, ny + 1, khtr_v_ext, this%khtr_v)
+      else
+         call redi_face_const(nx + 1, ny, this%khtr, this%khtr_u)
+         call redi_face_const(nx, ny + 1, this%khtr, this%khtr_v)
+      end if
+
+      do it = 1, size(ms%tracers)
+         call redi_snapshot(nx, ny, nz, ms%tracers(it)%hTr, this%tr_snap)
+         call redi_apply_flux_hoist_impl(nx, ny, nz, this%nsurf, dt, &
+                                         nghost, nxp, nyp, wall_w, wall_e, wall_s, wall_n, &
+                                         this%khtr_u, this%khtr_v, &
+                                         metrics%dy_cu, metrics%dx_cv, &
+                                         metrics%idxCu, metrics%idyCv, metrics%areaT, &
+                                         ms%h_layer, this%tr_snap, ms%tracers(it)%hTr, &
+                                         this%uPoL, this%uPoR, this%uKoL, this%uKoR, this%uhEff, &
+                                         this%vPoL, this%vPoR, this%vKoL, this%vKoR, this%vhEff)
+      end do
+   end subroutine redi_apply_flux_hoist
+
+   pure subroutine redi_face_flux_hoist(nz, ns, nxc, nyc, nfa, nfb, h_layer, hTr_in, &
+                                        iN, jN, fa, fb, PoL, PoR, KoL, KoR, hEff, coef, &
+                                        centre_is_left, TlC, TiC, aLC, aRC, dTr)
+      DC_ROUTINE_SEQ
+      !! One C-grid face flux, given this cell's PRE-BUILT centre column
+      !! (TlC/TiC/aLC/aRC). Rebuilds only the distinct NEIGHBOUR column
+      !! `(iN,jN)` and runs the ns-1 sublayer sweep. `centre_is_left` = this
+      !! (centre) cell is the geometric LEFT (west/south) column of the face:
+      !! then L := centre, R := neighbour and +flx goes into nz+1-KoL; else the
+      !! centre is the RIGHT column, L := neighbour, R := centre and -flx goes
+      !! into nz+1-KoR. Bit-identical to redi_face_flux: the L/R argument order
+      !! into redi_sublayer_dT and the +KoL / -KoR sign rule are preserved.
+      integer, intent(in) :: nz, ns, nxc, nyc, nfa, nfb
+      integer, intent(in) :: iN, jN, fa, fb
+      real(wp), intent(in) :: h_layer(nxc, nyc, nz), hTr_in(nxc, nyc, nz)
+      real(wp), intent(in) :: PoL(nfa, nfb, ns), PoR(nfa, nfb, ns)
+      integer, intent(in) :: KoL(nfa, nfb, ns), KoR(nfa, nfb, ns)
+      real(wp), intent(in) :: hEff(nfa, nfb, ns - 1)
+      real(wp), intent(in) :: coef
+      logical, intent(in) :: centre_is_left
+      real(wp), intent(in) :: TlC(NZ_STACK_MAX), TiC(NZ_STACK_MAX + 1), aLC(NZ_STACK_MAX), aRC(NZ_STACK_MAX)
+      real(wp), intent(inout) :: dTr(nz)
+
+      integer :: k, ks, knat
+      real(wp) :: hcN(NZ_STACK_MAX), trcN(NZ_STACK_MAX)
+      real(wp) :: TlN(NZ_STACK_MAX), TiN(NZ_STACK_MAX + 1), aLN(NZ_STACK_MAX), aRN(NZ_STACK_MAX)
+      real(wp) :: dtdiff, flx
+
+      do k = 1, nz
+         hcN(k) = h_layer(iN, jN, k)
+         trcN(k) = hTr_in(iN, jN, k)
+      end do
+      call redi_tracer_column(nz, hcN, trcN, TlN, TiN, aLN, aRN)
+      do ks = 1, ns - 1
+         if (hEff(fa, fb, ks) /= 0.0_wp) then
+            if (centre_is_left) then
+               dtdiff = redi_sublayer_dT(nz, KoL(fa, fb, ks), KoL(fa, fb, ks + 1), &
+                                         KoR(fa, fb, ks), KoR(fa, fb, ks + 1), &
+                                         PoL(fa, fb, ks), PoL(fa, fb, ks + 1), &
+                                         PoR(fa, fb, ks), PoR(fa, fb, ks + 1), &
+                                         TlC, TiC, aLC, aRC, TlN, TiN, aLN, aRN)
+               flx = dtdiff*hEff(fa, fb, ks)*coef
+               knat = nz + 1 - KoL(fa, fb, ks)
+               dTr(knat) = dTr(knat) + flx
+            else
+               dtdiff = redi_sublayer_dT(nz, KoL(fa, fb, ks), KoL(fa, fb, ks + 1), &
+                                         KoR(fa, fb, ks), KoR(fa, fb, ks + 1), &
+                                         PoL(fa, fb, ks), PoL(fa, fb, ks + 1), &
+                                         PoR(fa, fb, ks), PoR(fa, fb, ks + 1), &
+                                         TlN, TiN, aLN, aRN, TlC, TiC, aLC, aRC)
+               flx = dtdiff*hEff(fa, fb, ks)*coef
+               knat = nz + 1 - KoR(fa, fb, ks)
+               dTr(knat) = dTr(knat) - flx
+            end if
+         end if
+      end do
+   end subroutine redi_face_flux_hoist
+
+   pure subroutine redi_cell_flux(i, j, nx, ny, nz, ns, dt, &
+                                  wall_w, wall_e, wall_s, wall_n, &
+                                  wuf_w, wuf_e, wvf_s, wvf_n, &
+                                  khtr_u, khtr_v, dy_cu, dx_cv, idxCu, idyCv, &
+                                  h_layer, hTr_in, &
+                                  uPoL, uPoR, uKoL, uKoR, uhEff, &
+                                  vPoL, vPoR, vKoL, vKoR, vhEff, dTr)
+      DC_ROUTINE_SEQ
+      !! Accumulate the four bounding-face Redi fluxes into cell (i,j)'s dTr,
+      !! reconstructing the CENTRE column (i,j) ONCE (the hoist) and reusing it
+      !! across all four faces. W,E,S,N order and per-face wall guards are
+      !! identical to redi_apply_flux_impl's loop body.
+      integer, intent(in) :: i, j, nx, ny, nz, ns
+      real(wp), intent(in) :: dt
+      logical, intent(in) :: wall_w, wall_e, wall_s, wall_n
+      integer, intent(in) :: wuf_w, wuf_e, wvf_s, wvf_n
+      real(wp), intent(in) :: khtr_u(nx + 1, ny), khtr_v(nx, ny + 1)
+      real(wp), intent(in) :: dy_cu(nx + 1, ny), dx_cv(nx, ny + 1)
+      real(wp), intent(in) :: idxCu(nx + 1, ny), idyCv(nx, ny + 1)
+      real(wp), intent(in) :: h_layer(nx, ny, nz), hTr_in(nx, ny, nz)
+      real(wp), intent(in) :: uPoL(nx + 1, ny, ns), uPoR(nx + 1, ny, ns)
+      integer, intent(in) :: uKoL(nx + 1, ny, ns), uKoR(nx + 1, ny, ns)
+      real(wp), intent(in) :: uhEff(nx + 1, ny, ns - 1)
+      real(wp), intent(in) :: vPoL(nx, ny + 1, ns), vPoR(nx, ny + 1, ns)
+      integer, intent(in) :: vKoL(nx, ny + 1, ns), vKoR(nx, ny + 1, ns)
+      real(wp), intent(in) :: vhEff(nx, ny + 1, ns - 1)
+      real(wp), intent(inout) :: dTr(nz)
+
+      integer :: k
+      real(wp) :: hcC(NZ_STACK_MAX), trcC(NZ_STACK_MAX)
+      real(wp) :: TlC(NZ_STACK_MAX), TiC(NZ_STACK_MAX + 1), aLC(NZ_STACK_MAX), aRC(NZ_STACK_MAX)
+
+      ! ---- HOIST: build this cell's centre column ONCE (was rebuilt 4x) ----
+      do k = 1, nz
+         hcC(k) = h_layer(i, j, k)
+         trcC(k) = hTr_in(i, j, k)
+      end do
+      call redi_tracer_column(nz, hcC, trcC, TlC, TiC, aLC, aRC)
+
+      ! WEST u-face (face i): centre is the RIGHT column; neighbour (i-1,j) LEFT.
+      if (i >= 2 .and. .not. ((wall_w .and. i == wuf_w) .or. (wall_e .and. i == wuf_e))) then
+         call redi_face_flux_hoist(nz, ns, nx, ny, nx + 1, ny, h_layer, hTr_in, &
+                                   i - 1, j, i, j, uPoL, uPoR, uKoL, uKoR, uhEff, &
+                                   dt*khtr_u(i, j)*dy_cu(i, j)*idxCu(i, j), .false., &
+                                   TlC, TiC, aLC, aRC, dTr)
+      end if
+      ! EAST u-face (face i+1): centre is the LEFT column; neighbour (i+1,j) RIGHT.
+      if (i <= nx - 1 .and. .not. ((wall_w .and. i + 1 == wuf_w) .or. (wall_e .and. i + 1 == wuf_e))) then
+         call redi_face_flux_hoist(nz, ns, nx, ny, nx + 1, ny, h_layer, hTr_in, &
+                                   i + 1, j, i + 1, j, uPoL, uPoR, uKoL, uKoR, uhEff, &
+                                   dt*khtr_u(i + 1, j)*dy_cu(i + 1, j)*idxCu(i + 1, j), .true., &
+                                   TlC, TiC, aLC, aRC, dTr)
+      end if
+      ! SOUTH v-face (face j): centre is the RIGHT (north) column; neighbour (i,j-1) LEFT.
+      if (j >= 2 .and. .not. ((wall_s .and. j == wvf_s) .or. (wall_n .and. j == wvf_n))) then
+         call redi_face_flux_hoist(nz, ns, nx, ny, nx, ny + 1, h_layer, hTr_in, &
+                                   i, j - 1, i, j, vPoL, vPoR, vKoL, vKoR, vhEff, &
+                                   dt*khtr_v(i, j)*dx_cv(i, j)*idyCv(i, j), .false., &
+                                   TlC, TiC, aLC, aRC, dTr)
+      end if
+      ! NORTH v-face (face j+1): centre is the LEFT (south) column; neighbour (i,j+1) RIGHT.
+      if (j <= ny - 1 .and. .not. ((wall_s .and. j + 1 == wvf_s) .or. (wall_n .and. j + 1 == wvf_n))) then
+         call redi_face_flux_hoist(nz, ns, nx, ny, nx, ny + 1, h_layer, hTr_in, &
+                                   i, j + 1, i, j + 1, vPoL, vPoR, vKoL, vKoR, vhEff, &
+                                   dt*khtr_v(i, j + 1)*dx_cv(i, j + 1)*idyCv(i, j + 1), .true., &
+                                   TlC, TiC, aLC, aRC, dTr)
+      end if
+   end subroutine redi_cell_flux
+
+   subroutine redi_apply_flux_hoist_impl(nx, ny, nz, ns, dt, &
+                                         nghost, nxp, nyp, wall_w, wall_e, wall_s, wall_n, &
+                                         khtr_u, khtr_v, dy_cu, dx_cv, &
+                                         idxCu, idyCv, areaT, h_layer, hTr_in, hTr, &
+                                         uPoL, uPoR, uKoL, uKoR, uhEff, &
+                                         vPoL, vPoR, vKoL, vKoR, vhEff)
+      !! Hoisted Phase-B kernel for ONE tracer. Same cell-centric double-visit
+      !! and divergence as redi_apply_flux_impl; the four faces are handled by
+      !! redi_cell_flux, which builds the centre column once. Loop-body DC
+      !! footprint stays local(k, dTr, iaij) -- the heavy column arrays live in
+      !! redi_cell_flux's frame, exactly as redi_face_flux did for the faithful path.
+      integer, intent(in) :: nx, ny, nz, ns
+      real(wp), intent(in) :: dt
+      integer, intent(in) :: nghost, nxp, nyp
+      logical, intent(in) :: wall_w, wall_e, wall_s, wall_n
+      real(wp), intent(in) :: khtr_u(nx + 1, ny)
+      real(wp), intent(in) :: khtr_v(nx, ny + 1)
+      real(wp), intent(in) :: dy_cu(nx + 1, ny)
+      real(wp), intent(in) :: dx_cv(nx, ny + 1)
+      real(wp), intent(in) :: idxCu(nx + 1, ny)
+      real(wp), intent(in) :: idyCv(nx, ny + 1)
+      real(wp), intent(in) :: areaT(nx, ny)
+      real(wp), intent(in) :: h_layer(nx, ny, nz)
+      real(wp), intent(in) :: hTr_in(nx, ny, nz)
+      real(wp), intent(inout) :: hTr(nx, ny, nz)
+      real(wp), intent(in) :: uPoL(nx + 1, ny, ns), uPoR(nx + 1, ny, ns)
+      integer, intent(in) :: uKoL(nx + 1, ny, ns), uKoR(nx + 1, ny, ns)
+      real(wp), intent(in) :: uhEff(nx + 1, ny, ns - 1)
+      real(wp), intent(in) :: vPoL(nx, ny + 1, ns), vPoR(nx, ny + 1, ns)
+      integer, intent(in) :: vKoL(nx, ny + 1, ns), vKoR(nx, ny + 1, ns)
+      real(wp), intent(in) :: vhEff(nx, ny + 1, ns - 1)
+
+      integer :: i, j, k
+      integer :: wuf_w, wuf_e, wvf_s, wvf_n
+      real(wp) :: dTr(NZ_STACK_MAX)
+      real(wp) :: iaij
+
+      wuf_w = nghost + 1
+      wuf_e = nghost + nxp + 1
+      wvf_s = nghost + 1
+      wvf_n = nghost + nyp + 1
+
+      do concurrent(j=1:ny, i=1:nx) local(k, dTr, iaij)
+         do k = 1, nz
+            dTr(k) = 0.0_wp
+         end do
+         call redi_cell_flux(i, j, nx, ny, nz, ns, dt, &
+                             wall_w, wall_e, wall_s, wall_n, &
+                             wuf_w, wuf_e, wvf_s, wvf_n, &
+                             khtr_u, khtr_v, dy_cu, dx_cv, idxCu, idyCv, &
+                             h_layer, hTr_in, &
+                             uPoL, uPoR, uKoL, uKoR, uhEff, &
+                             vPoL, vPoR, vKoL, vKoR, vhEff, dTr)
+         iaij = 1.0_wp/areaT(i, j)
+         do k = 1, nz
+            hTr(i, j, k) = hTr(i, j, k) + dTr(k)*iaij
+         end do
+      end do
+   end subroutine redi_apply_flux_hoist_impl
 end module ocean_redi

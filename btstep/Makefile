@@ -25,6 +25,8 @@ BASE_FFLAGS := $(FFLAGS_BASE) -I../common
 # module order: constants -> bt_state -> btstep -> driver (OLD OBJS minus
 # NVTX/plain/fused), driver last.
 DC_SRCS     := constants.F90 bt_state.F90 btstep.F90 drivers/dc_main.F90
+# A/B driver: same compute, swap the driver (faithful vs fused, bit-identity + speedup)
+DCAB_SRCS   := constants.F90 bt_state.F90 btstep.F90 drivers/dc_ab.F90
 
 # ---- do-concurrent build mode: DATA selects the device data layer ----------
 DATA ?= acc
@@ -41,6 +43,23 @@ DCBIN  := dc_$(DATA)
 DCBLD  := build/dc_$(DATA)
 DCOBJS := $(addprefix $(DCBLD)/,$(notdir $(DC_SRCS:.F90=.o)))
 
+DCABBIN  := dc_ab_$(DATA)
+DCABBLD  := build/dc_ab_$(DATA)
+DCABOBJS := $(addprefix $(DCABBLD)/,$(notdir $(DCAB_SRCS:.F90=.o)))
+
+# ---- SHARED head-to-head driver: opt-DC vs opt-CUDA on ONE device truth -----
+# Both optimized endpoints run on the SAME device arrays via `!$acc host_data
+# use_device`, in one binary. The Fortran side (driver + bridge) is compiled
+# WITH -acc but WITHOUT -cuda (that flag switches on CUDA-Fortran mode and trips
+# NVFORTRAN-S-0528 inside host_data); -cuda is LINK-ONLY. opt_kernel.cu builds
+# with nvcc using the SAME flags btstep's `ab` build used.
+CMP_F_SRCS := constants.F90 bt_state.F90 btstep.F90 drivers/btstep_bridge.F90 drivers/cmp_main.F90
+CMPBIN     := cmp_acc
+CMPBLD     := build/cmp
+CMP_FFLAGS := -stdpar=gpu -acc=gpu -gpu=$(ARCH),mem:separate -gpu=tripcount:host -DDC_DATA_ACC
+CMP_FOBJS  := $(addprefix $(CMPBLD)/,$(notdir $(CMP_F_SRCS:.F90=.o)))
+CMP_CUOBJ  := $(CMPBLD)/opt_kernel.o
+
 # ---- native C++ build mode: BACKEND selects the GPU runtime ----------------
 CU_SRCS := btstep_kernel.cu drivers/cpp_main.cu
 CUFLAGS := -O3 $(GPU_ARCHFLAG) -I. -I../common --compiler-options -fPIC
@@ -54,13 +73,15 @@ CUOBJS  := $(addprefix $(CPPBLD)/,$(notdir $(CU_SRCS:.cu=.o)))
 vpath %.F90 . drivers
 vpath %.cu  . drivers
 
-.PHONY: dc cpp run-dc run-cpp verify clean
+.PHONY: dc dcab cpp cmp run-dc run-dcab run-cpp run-cmp verify clean
 .NOTPARALLEL:            # honour the DC_SRCS dependency order
 
 dc: $(DCBIN)
+dcab: $(DCABBIN)
 cpp: $(CPPBIN)
+cmp: $(CMPBIN)
 
-$(DCBLD) $(CPPBLD):
+$(DCBLD) $(DCABBLD) $(CPPBLD) $(CMPBLD):
 	@mkdir -p $@
 
 $(DCBLD)/%.o: %.F90 ../common/directives.h | $(DCBLD)
@@ -69,17 +90,39 @@ $(DCBLD)/%.o: %.F90 ../common/directives.h | $(DCBLD)
 $(DCBIN): $(DCOBJS)
 	$(FC) $(BASE_FFLAGS) $(DC_MODE_FLAGS) $(DCOBJS) -o $@
 
+$(DCABBLD)/%.o: %.F90 ../common/directives.h | $(DCABBLD)
+	$(FC) $(BASE_FFLAGS) $(DC_MODE_FLAGS) $(MODFLAG) $(DCABBLD) -c $< -o $@
+
+$(DCABBIN): $(DCABOBJS)
+	$(FC) $(BASE_FFLAGS) $(DC_MODE_FLAGS) $(DCABOBJS) -o $@
+
 $(CPPBLD)/%.o: %.cu ../common/gpu_rt.h btstep_args.h | $(CPPBLD)
 	$(NVCC) $(CUFLAGS) -c $< -o $@
 
 $(CPPBIN): $(CUOBJS)
 	$(NVCC) $(CUOBJS) -o $@ $(GPU_ARCHFLAG)
 
+# ---- SHARED head-to-head driver: build rules ------------------------------
+# Fortran: -acc, NO -cuda.  CUDA: nvcc (same flags as btstep's `ab` build).
+# Link: FC with -cuda (LINK-ONLY).
+$(CMPBLD)/%.o: %.F90 ../common/directives.h btstep_args.h | $(CMPBLD)
+	$(FC) $(BASE_FFLAGS) $(CMP_FFLAGS) $(MODFLAG) $(CMPBLD) -c $< -o $@
+
+$(CMP_CUOBJ): opt_kernel.cu ../common/gpu_rt.h btstep_args.h | $(CMPBLD)
+	$(NVCC) -O3 $(GPU_ARCHFLAG) -I../common -I. --compiler-options -fPIC -c opt_kernel.cu -o $@
+
+$(CMPBIN): $(CMP_FOBJS) $(CMP_CUOBJ)
+	$(FC) $(BASE_FFLAGS) $(CMP_FFLAGS) -cuda $(CMP_FOBJS) $(CMP_CUOBJ) -o $@
+
 ARGS ?= 473 297 24 200 10
 run-dc: dc
 	@./$(DCBIN) $(ARGS)
+run-dcab: dcab
+	@./$(DCABBIN) $(ARGS)
 run-cpp: cpp
 	@./$(CPPBIN) $(ARGS)
+run-cmp: cmp
+	@bash ../tmp_local_artifacts/gpu_run.sh btstep-cmp ./$(CMPBIN) $(ARGS)
 
 # Prove the macro'd data layer is numerically inert: OpenACC (GPU) writes a
 # reference; the CPU and OpenMP-target builds recompute and cross-check it.
@@ -94,4 +137,4 @@ verify:
 	@DC_REF=eta_ref.bin  ./dc_omp  $(VARGS)
 
 clean:
-	@rm -rf build dc_acc dc_omp dc_none cpp_cuda cpp_hip eta_ref.bin *.mod
+	@rm -rf build dc_acc dc_omp dc_none dc_ab_acc dc_ab_omp dc_ab_none cpp_cuda cpp_hip cmp_acc eta_ref.bin *.mod
