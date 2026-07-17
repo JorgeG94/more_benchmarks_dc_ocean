@@ -11,16 +11,20 @@ module rk2_ale_mod
    use, intrinsic :: iso_c_binding, only: c_int, c_double
    use constants, only: wp, REMAP_PPM, VCOORD_ZSTAR
    use remap_state, only: hgrid_t, ocean_vcoord_t, multilayer_cgrid_state_t
-   use ale_remap, only: ale_remap_step_opt
+   use ale_remap, only: ale_remap_step_opt, ale_remap_step
    implicit none
    private
-   public :: rk2_ale_init, rk2_ale_stage, rk2_ale_stage_cuda, rk2_ale_probe
+   public :: rk2_ale_init, rk2_ale_stage, rk2_ale_stage_unopt, rk2_ale_probe
+#ifndef RK2_NO_CUDA
+   public :: rk2_ale_stage_cuda, rk2_ale_stage_cuda_unopt
+#endif
 
    integer, parameter :: NGHOST = 3
    integer, parameter :: PERT_PCT = 25
 
+#ifndef RK2_NO_CUDA
    interface
-      ! extern "C" ale_remap_opt (opt_kernel.cu) -- lifted from ale_bridge.F90.
+      ! opt: extern "C" ale_remap_opt (opt_kernel.cu) -- from ale_bridge.F90.
       subroutine ale_remap_opt(nx, ny, nz, h_layer, h_old, target_h, &
                                hTr_t, hTr_s, u, v, mass_b, heat_b, salt_b, &
                                eta, H_ref, dsig) bind(C, name="ale_remap_opt")
@@ -31,7 +35,23 @@ module rk2_ale_mod
          real(wp) :: mass_b(*), heat_b(*), salt_b(*)
          real(wp) :: eta(*), H_ref(*), dsig(*)
       end subroutine ale_remap_opt
+      ! faithful: extern "C" ale_remap_cuda (ale_kernel.cu); method+fused ints by
+      ! value, plus the total_h/h_ref scratch the un-fused path needs.
+      ! NOTE: Fortran is case-insensitive, so the C args h_ref (scratch) and
+      ! H_ref (bt_H_ref) must get DISTINCT Fortran dummy names; positional bind(C).
+      subroutine ale_remap_cuda(nx, ny, nz, method, fused, h_layer, h_old, target_h, &
+                                total_h, hrefsc, hTr_t, hTr_s, u, v, &
+                                mass_b, heat_b, salt_b, eta, hrefbt, dsig) &
+         bind(C, name="ale_remap_cuda")
+         import :: wp, c_int
+         integer(c_int), value :: nx, ny, nz, method, fused
+         real(wp) :: h_layer(*), h_old(*), target_h(*), total_h(*), hrefsc(*)
+         real(wp) :: hTr_t(*), hTr_s(*), u(*), v(*)
+         real(wp) :: mass_b(*), heat_b(*), salt_b(*)
+         real(wp) :: eta(*), hrefbt(*), dsig(*)
+      end subroutine ale_remap_cuda
    end interface
+#endif
 
    type(hgrid_t), save :: grid
    type(ocean_vcoord_t), target, save :: vc
@@ -128,6 +148,31 @@ contains
       call ale_remap_step_opt(grid, vc, ms, bt_eta, bt_H_ref)
    end subroutine rk2_ale_stage
 
+   subroutine rk2_ale_stage_unopt() bind(C, name="rk2_ale_stage_unopt")
+      call ale_remap_step(grid, vc, ms, bt_eta, bt_H_ref)
+   end subroutine rk2_ale_stage_unopt
+
+#ifndef RK2_NO_CUDA
+   subroutine rk2_ale_stage_cuda_unopt() bind(C, name="rk2_ale_stage_cuda_unopt")
+      ! Faithful CUDA: ale_remap_cuda with fused=0 (the un-fused 6-kernel path).
+      integer :: nx, ny, nz
+      nx = grid%nx_total; ny = grid%ny_total; nz = ms%nz_ml
+      !$acc host_data use_device(ms%h_layer, vc%remap_h_old, vc%target_h, &
+      !$acc                      vc%remap_total_h, vc%remap_h_ref, &
+      !$acc                      ms%tracers(1)%hTr, ms%tracers(2)%hTr, &
+      !$acc                      ms%u_face_x_layer, ms%v_face_y_layer, &
+      !$acc                      ms%mass_budget_remap, ms%heat_budget_remap, ms%salt_budget_remap, &
+      !$acc                      bt_eta, bt_H_ref, vc%dsig)
+      call ale_remap_cuda(nx, ny, nz, REMAP_PPM, 0, &
+                          ms%h_layer, vc%remap_h_old, vc%target_h, &
+                          vc%remap_total_h, vc%remap_h_ref, &
+                          ms%tracers(1)%hTr, ms%tracers(2)%hTr, &
+                          ms%u_face_x_layer, ms%v_face_y_layer, &
+                          ms%mass_budget_remap, ms%heat_budget_remap, ms%salt_budget_remap, &
+                          bt_eta, bt_H_ref, vc%dsig)
+      !$acc end host_data
+   end subroutine rk2_ale_stage_cuda_unopt
+
    subroutine rk2_ale_stage_cuda() bind(C, name="rk2_ale_stage_cuda")
       integer :: nx, ny, nz
       nx = grid%nx_total; ny = grid%ny_total; nz = ms%nz_ml
@@ -144,6 +189,7 @@ contains
                          bt_eta, bt_H_ref, vc%dsig)
       !$acc end host_data
    end subroutine rk2_ale_stage_cuda
+#endif
 
    subroutine rk2_ale_probe(vmin, vmax) bind(C, name="rk2_ale_probe")
       real(c_double), intent(out) :: vmin, vmax

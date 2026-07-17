@@ -1,62 +1,81 @@
-# ideal_benchmark — the whole-model RK2 harness (all-DC vs all-CUDA)
+# ideal_benchmark — the whole-model RK2 harness (naive-DC | opt-DC | hand-CUDA | CPU)
 
-A **dumb RK2 (2-stage) time-stepping driver that runs ALL 9 build-mode kernels
-back-to-back per stage**, keeping the GPU hot, to measure the *aggregate*
-whole-model cost. Physical correctness does **not** matter — each kernel runs on
-its own independent state, driven in lockstep; this is a timing harness, not a
-coupled model.
+A **dumb RK2 (2-stage) time-stepping driver that runs the 8-kernel ocean core
+back-to-back per stage**, keeping the GPU (or CPU) hot, to measure the
+*aggregate* whole-model cost. Physical correctness does **not** matter — each
+kernel runs on its own independent state, driven in lockstep; this is a timing
+harness, not a coupled model. `hll` is excluded, so the core is the 8 kernels
+continuity, redi, ale, hvisc, btstep, kappa, epbl, meke.
 
-The binary times **two passes on the same resident device state**:
+It gives a **3-way model-level comparison** — naive `do concurrent`, optimized
+`do concurrent`, and hand-written CUDA — plus an **all-CPU whole-model number**:
 
-* **Phase 1 — all-DC**: each stage calls the kernel's optimized `do concurrent`
-  routine.
-* **Phase 2 — all-CUDA**: each stage calls the kernel's optimized CUDA launcher
-  (`opt_kernel.cu`) via `!$acc host_data use_device`, on the *same* device
-  arrays `rk2_<k>_init` already allocated + `enter data`'d. The CUDA pass runs on
-  the state the DC pass left behind — fine for timing; per-kernel bit-identity
-  DC==CUDA is already proven by each kernel's `cmp` build, so this harness only
-  times and finite/non-zero-checks.
+* **MODE** `dc | cuda | both` — which side(s) to TIME.
+* **VERSION** `opt | unopt` — the optimized routines vs the **faithful** ports
+  (naive DC / faithful CUDA). kappa & epbl have no opt DC variant, so their
+  opt-DC == unopt-DC (expected).
+* **`rk2_cpu`** — a second binary built `DATA=none` (`-stdpar=multicore`, or
+  serial) with all CUDA compiled out (`-DRK2_NO_CUDA`): the whole model in pure
+  `do concurrent` on the host.
 
-Every kernel sits behind a `bind(C)` seam: `rk2_<k>_init` / `rk2_<k>_stage`
-(DC) / `rk2_<k>_stage_cuda` (CUDA) / `rk2_<k>_probe`.
+Every kernel sits behind a `bind(C)` seam, up to four stage entries:
+`rk2_<k>_stage` (opt-DC), `rk2_<k>_stage_unopt` (faithful-DC),
+`rk2_<k>_stage_cuda` (opt-CUDA), `rk2_<k>_stage_cuda_unopt` (faithful-CUDA),
+plus `rk2_<k>_init` / `rk2_<k>_probe`. `rk2_main` dispatches on MODE+VERSION.
 
-## Run
+## Run — the exact CLI
 
 ```bash
-make                 # build ./rk2  (nvfortran + nvcc, OpenACC GPU, cc70/sm_70)
-make run             # build + run THROUGH THE GPU LOCK  (473 297 30 100 10)
-# or explicitly (never run the GPU binary directly — shared card):
-../tmp_local_artifacts/gpu_run.sh rk2-cuda ./rk2 473 297 30 100 10
-make clean
+make                 # build ./rk2 (GPU) and ./rk2_cpu (CPU); nvfortran + nvcc
+make rk2_cpu DC_HOST_FLAGS=      # CPU serial build (empty host flags)
+
+# GPU: MODE in {dc,cuda,both} (default both), VERSION in {opt,unopt} (default opt)
+./rk2      NXP NYP NZ NSTEPS NWARM [MODE] [VERSION]
+# CPU: DC-only, mode implicit; arg 6 is VERSION
+./rk2_cpu  NXP NYP NZ NSTEPS NWARM [VERSION]
+
+make run       # rk2 through the GPU LOCK (473 297 30 100 10 both opt)
+make run-cpu   # rk2_cpu directly (CPU-only, no lock)
+# GPU must go through the lock (shared card):
+../tmp_local_artifacts/gpu_run.sh rk2-cuda ./rk2 473 297 30 100 10 both opt
 ```
 
-Args: `nx_phys ny_phys nz nsteps nwarm`. Each kernel adds its own ghost halo
-(most `nghost=3`, hll `nghost=2`) exactly as its standalone driver does.
+Each kernel adds its own ghost halo (`nghost=3`, hll would be 2 but is excluded).
 
-The harness prints the headline **all-DC vs all-CUDA ms/RK2-step + ratio**, a
-**per-kernel ms/stage breakdown for BOTH sides side by side** (one isolated loop
-per kernel), and a finite+non-zero sanity probe of each kernel's output field on
-both passes.
+**Machine-readable output** — one line per timed side (so `MODE=both VERSION=opt`
+emits two, `mode=dc` and `mode=cuda`):
 
-## The CUDA side (Phase 2)
+```
+RESULT target=<gpu|cpu> mode=<dc|cuda> version=<opt|unopt> ms_per_stage=<f> ms_per_step=<f>
+```
 
-Each `wrap/rk2_<k>.F90` gains `rk2_<k>_stage_cuda`, which wraps the kernel's
-`extern "C"` optimized launcher in `!$acc host_data use_device(<that kernel's
-device arrays>)`. Five kernels lift the interface + host_data call verbatim from
-the kernel's existing `drivers/*_bridge.F90`; four are new bridges read straight
-from the launcher's signature in `opt_kernel.cu`:
+plus a human per-kernel ms/stage table + finite/non-zero sanity per side.
 
-| kernel     | opt-CUDA launcher            | bridge source                        |
-|------------|------------------------------|--------------------------------------|
-| redi       | `redi_opt_launch`            | reuse `redi/drivers/redi_bridge.F90` |
-| hvisc      | `hvisc_opt_launch`           | reuse `hvisc/.../hvisc_bridge.F90`   |
-| ale        | `ale_remap_opt`              | reuse `ale_remap/.../ale_bridge.F90` |
-| btstep     | `btstep_opt_launch_flat`     | reuse `btstep/.../btstep_bridge.F90` |
-| meke       | `meke_opt_launch_flat`       | reuse `meke/.../meke_bridge.F90`     |
-| continuity | `continuity_opt_launch`      | new (flat pointer list)              |
-| hll        | `flux_hll_opt_launch`        | new (flat pointer list)              |
-| kappa      | `ks_opt_launch`              | new, via `shim_ks.cu`                |
-| epbl       | `epbl_opt_launch`            | new, via `shim_epbl.cu`              |
+## The CUDA side
+
+Each `wrap/rk2_<k>.F90` wraps the kernel's `extern "C"` launcher in `!$acc
+host_data use_device(<that kernel's device arrays>)`. Both an **opt** launcher
+(`opt_kernel.cu`) and a **faithful** launcher (`<k>_kernel.cu`) are linked into
+each kernel's `.so`:
+
+| kernel     | opt-CUDA launcher        | faithful-CUDA launcher              | bridge / shim |
+|------------|--------------------------|-------------------------------------|---------------|
+| redi       | `redi_opt_launch`        | `redi_cuda_launch_`                 | reuse `redi_bridge.F90` |
+| hvisc      | `hvisc_opt_launch`       | `hvisc_compute_smag/face_cuda_launch` (2-pass) | reuse `hvisc_bridge.F90` |
+| ale        | `ale_remap_opt`          | `ale_remap_cuda` (fused=0)          | reuse `ale_bridge.F90` |
+| btstep     | `btstep_opt_launch_flat` | `btstep_cuda_launch` (mode 0)       | reuse + `shim_btstep.cu` |
+| meke       | `meke_opt_launch_flat`   | `meke_cuda_launch` (mode 0)         | reuse + `shim_meke.cu` |
+| continuity | `continuity_opt_launch`  | `continuity_layered_cuda_launch`    | flat pointer list |
+| kappa      | `ks_opt_launch`          | `ks_cuda_launch`                    | `shim_ks.cu` |
+| epbl       | `epbl_opt_launch`        | `epbl_cuda_launch` (variant 0)      | `shim_epbl.cu` |
+
+All 8 faithful CUDA launchers link and run (validated finite+non-zero) — **none
+excluded**. The struct-taking faithful launchers (btstep `BtArgs`, meke
+`MekeArgs`, kappa `KsPar`, epbl `EpblParams`) are fed by the same flat shims that
+serve the opt side, extended with a second `*_cuda_flat` entry.
+
+`ks_opt_launch` / `epbl_opt_launch` take a struct-of-knobs (`KsPar` /
+`EpblParams`) plus device scratch counters, awkward to build from Fortran, so
 
 `ks_opt_launch` / `epbl_opt_launch` take a struct-of-knobs (`KsPar` /
 `EpblParams`) plus device scratch counters, awkward to build from Fortran, so
@@ -72,36 +91,31 @@ NVFORTRAN-S-0528 on the device-attributed host_data arrays). Each kernel's
 linked into its `build/lib<k>.so`; `-cuda` is **link-only**, on both the `.so`
 and the final exe, to pull in `libcudart`.
 
-All 9 CUDA launchers wired up cleanly — **none excluded**.
+## The 8 kernels — opt-DC and faithful-DC compute routines
 
-## The 9 kernels and their opt-DC compute entry points
+| # | kernel dir           | module                        | opt-DC routine (per stage)                          | faithful-DC routine |
+|---|----------------------|-------------------------------|-----------------------------------------------------|---------------------|
+| 1 | `continuity_layered` | `continuity_layered`          | `continuity_compute_fluxes_fused`                   | `continuity_compute_fluxes` |
+| 2 | `redi`               | `ocean_redi`                  | `redi_calc_coeffs` + `redi_apply_flux_hoist`        | `redi_calc_coeffs` + `redi_apply_flux` |
+| 3 | `ale_remap`          | `ale_remap`                   | `ale_remap_step_opt`                                | `ale_remap_step` |
+| 4 | `hvisc`              | `ocean_horizontal_viscosity`  | `hvisc_compute_fused`                               | `hvisc_compute_smag` + `hvisc_compute_face` |
+| 5 | `btstep`             | `btstep`                      | `btstep_nonlinear_closed_fused` (24 substeps)       | `btstep_nonlinear_closed` |
+| 6 | `kappa_shear`        | `ks`                          | `kappa_shear_column_kernel` (no opt variant)        | = opt |
+| 7 | `epbl`               | `ocean_epbl`                  | `epbl_column_kernel` (no opt variant)               | = opt |
+| 8 | `meke`               | `meke`                        | `meke_step_ext_fused`                               | `meke_step_ext` |
 
-| # | kernel dir           | module                        | compute routine (per stage)                         |
-|---|----------------------|-------------------------------|-----------------------------------------------------|
-| 1 | `continuity_layered` | `continuity_layered`          | `continuity_compute_fluxes_fused`                   |
-| 2 | `redi`               | `ocean_redi`                  | `redi_calc_coeffs` **+** `redi_apply_flux_hoist`    |
-| 3 | `ale_remap`          | `ale_remap`                   | `ale_remap_step_opt`                                |
-| 4 | `hvisc`              | `ocean_horizontal_viscosity`  | `hvisc_compute_fused`                               |
-| 5 | `btstep`             | `btstep`                      | `btstep_nonlinear_closed_fused` (24 inner substeps) |
-| 6 | `kappa_shear`        | `ks`                          | `kappa_shear_column_kernel` (faithful, no opt)      |
-| 7 | `epbl`               | `ocean_epbl`                  | `epbl_column_kernel` (faithful, no opt)             |
-| 8 | `meke`               | `meke`                        | `meke_step_ext_fused`                               |
-| 9 | `hll_fluxes`         | `kernel_flux`                 | `compute_flux_hll` (faithful)                       |
-
-Each `wrap/rk2_<k>.F90` holds that kernel's state as module `save` allocatables
-and reuses its standalone driver's allocate + init + `!$acc enter data` verbatim
-(from `<kernel>/drivers/dc_ab.F90` or `dc_main.F90`). It exposes three `bind(C)`
-entries with unique C names: `rk2_<k>_init(nx,ny,nz)`, `rk2_<k>_stage()`,
-`rk2_<k>_probe(vmin,vmax)`.
+(`hll_fluxes` is excluded from the ocean core.) Each `wrap/rk2_<k>.F90` holds
+that kernel's state as module `save` allocatables and reuses its standalone
+driver's allocate + init + `!$acc enter data` verbatim.
 
 ## The hard part: module-name collisions, and how they're isolated
 
-The 9 kernels redefine **same-named modules with DIFFERENT bodies**:
+The kernels redefine **same-named modules with DIFFERENT bodies**:
 
 | module name              | defined by (different bodies)                     |
 |--------------------------|---------------------------------------------------|
-| `constants`              | all 9 (parameters only — emits no link symbols)   |
-| `grid`                   | continuity, redi, kappa, epbl, hll                |
+| `constants`              | all 8 (parameters only — emits no link symbols)   |
+| `grid`                   | continuity, redi, kappa, epbl                     |
 | `ocean_metrics`          | continuity, redi                                  |
 | `multilayer_cgrid_state` | continuity, redi, kappa                           |
 | `ocean_eos`              | redi, kappa                                        |
@@ -143,21 +157,24 @@ device routine `ocean_eos_eos_specvol_derivs_`.
 
 No kernel needed the module-rename fallback: `-Bsymbolic` on self-contained
 `.so`s isolated all 15 duplicated symbols and device registration stayed intact
-(all 9 outputs come back finite + non-zero, which a cross-bind or a broken
-device-kernel registration would not).
+(all 8 outputs come back finite + non-zero, which a cross-bind or a broken
+device-kernel registration would not). The CPU `.so`s (build_cpu/) are the same
+wrappers compiled `DATA=none` + `-DRK2_NO_CUDA`, so all `host_data`/CUDA code is
+`#ifdef`'d out and the whole model is bare `do concurrent` on the host.
 
 ## What `rk2_main` does
 
-* parse `nx ny nz nsteps nwarm`; call all 9 `rk2_<k>_init`;
-* **Phase 1 (all-DC)** — warm-up + timed `nsteps` RK2 steps (2 stages each),
-  every stage calls all 9 `rk2_<k>_stage` in order **continuity, redi, ale,
-  hvisc, btstep, kappa, epbl, meke, hll**; `!$acc wait` + `system_clock` bound
-  the loop → aggregate DC **ms/RK2-step**; then one isolated DC loop per kernel
-  (`nsteps*2` calls) → the DC ms/stage column; probe all 9;
-* **Phase 2 (all-CUDA)** — the identical structure on `rk2_<k>_stage_cuda`,
-  bounded by `cudaDeviceSynchronize` (the raw CUDA launches are on the default
-  stream, not the OpenACC queue) → CUDA aggregate + per-kernel column; probe all 9;
-* report the DC/CUDA headline ratio + the side-by-side per-kernel table.
+* parse `NXP NYP NZ NSTEPS NWARM [MODE] [VERSION]` (CPU build: arg 6 is VERSION,
+  mode forced `dc`); call all 8 `rk2_<k>_init`;
+* for each selected side (DC if `mode∈{dc,both}`, CUDA if `mode∈{cuda,both}`):
+  warm-up + timed `NSTEPS` RK2 steps (2 stages each), every stage calls the 8
+  kernels in order **continuity, redi, ale, hvisc, btstep, kappa, epbl, meke**,
+  dispatching to `rk2_<k>_stage[_unopt]` (DC) or `rk2_<k>_stage_cuda[_unopt]`
+  (CUDA) per VERSION; DC bounded by `!$acc wait`, CUDA by `cudaDeviceSynchronize`
+  (raw launches are on the default stream, not the OpenACC queue);
+* one isolated timed loop per kernel → the ms/stage column; probe all 8;
+* emit one `RESULT` line per timed side + the human table (+ DC/CUDA ratio when
+  `mode=both`).
 
 ## Caveats (timing-harness honesty)
 

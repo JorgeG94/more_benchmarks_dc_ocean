@@ -11,13 +11,19 @@ module rk2_kappa_mod
    use ks, only: ocean_kappa_shear_t, kappa_shear_column_kernel
    implicit none
    private
-   public :: rk2_kappa_init, rk2_kappa_stage, rk2_kappa_stage_cuda, rk2_kappa_probe
+   ! kappa has NO opt DC variant: opt DC == unopt DC == kappa_shear_column_kernel.
+   public :: rk2_kappa_init, rk2_kappa_stage, rk2_kappa_stage_unopt, rk2_kappa_probe
+#ifndef RK2_NO_CUDA
+   public :: rk2_kappa_stage_cuda, rk2_kappa_stage_cuda_unopt
+#endif
 
    integer, parameter :: NGHOST = 3
    real(wp), parameter :: DT_THERM = 300.0_wp
 
+#ifndef RK2_NO_CUDA
    interface
-      ! flat shim (ideal_benchmark/shim_ks.cu) -> ks_opt_launch (opt_kernel.cu).
+      ! flat shims (ideal_benchmark/shim_ks.cu). Identical signatures; opt -> the
+      ! tuned ks_opt_launch, unopt -> the faithful ks_cuda_launch.
       subroutine ks_opt_flat(h, u, v, hT, hS, wet, fc, kd, tke, nx, ny, nz, dt, sync) &
          bind(C, name="ks_opt_flat")
          import :: wp, c_int, c_double
@@ -25,7 +31,15 @@ module rk2_kappa_mod
          integer(c_int), value :: nx, ny, nz, sync
          real(c_double), value :: dt
       end subroutine ks_opt_flat
+      subroutine ks_cuda_flat(h, u, v, hT, hS, wet, fc, kd, tke, nx, ny, nz, dt, sync) &
+         bind(C, name="ks_cuda_flat")
+         import :: wp, c_int, c_double
+         real(wp) :: h(*), u(*), v(*), hT(*), hS(*), wet(*), fc(*), kd(*), tke(*)
+         integer(c_int), value :: nx, ny, nz, sync
+         real(c_double), value :: dt
+      end subroutine ks_cuda_flat
    end interface
+#endif
 
    type(hgrid_t), save :: grid
    type(multilayer_cgrid_state_t), save :: ms
@@ -142,6 +156,11 @@ contains
       call kappa_shear_column_kernel(grid, ks, ms, hT, hS, DT_THERM)
    end subroutine rk2_kappa_stage
 
+   subroutine rk2_kappa_stage_unopt() bind(C, name="rk2_kappa_stage_unopt")
+      call kappa_shear_column_kernel(grid, ks, ms, hT, hS, DT_THERM)
+   end subroutine rk2_kappa_stage_unopt
+
+#ifndef RK2_NO_CUDA
    subroutine rk2_kappa_stage_cuda() bind(C, name="rk2_kappa_stage_cuda")
       !$acc host_data use_device(ms%h_layer, ms%u_face_x_layer, ms%v_face_y_layer, &
       !$acc                      hT, hS, ms%wet_mask, ks%f_centre, ks%kd_int, ks%tke_int)
@@ -150,6 +169,16 @@ contains
                        grid%nx_total, grid%ny_total, ms%nz_ml, DT_THERM, 0)
       !$acc end host_data
    end subroutine rk2_kappa_stage_cuda
+
+   subroutine rk2_kappa_stage_cuda_unopt() bind(C, name="rk2_kappa_stage_cuda_unopt")
+      !$acc host_data use_device(ms%h_layer, ms%u_face_x_layer, ms%v_face_y_layer, &
+      !$acc                      hT, hS, ms%wet_mask, ks%f_centre, ks%kd_int, ks%tke_int)
+      call ks_cuda_flat(ms%h_layer, ms%u_face_x_layer, ms%v_face_y_layer, hT, hS, &
+                        ms%wet_mask, ks%f_centre, ks%kd_int, ks%tke_int, &
+                        grid%nx_total, grid%ny_total, ms%nz_ml, DT_THERM, 0)
+      !$acc end host_data
+   end subroutine rk2_kappa_stage_cuda_unopt
+#endif
 
    subroutine rk2_kappa_probe(vmin, vmax) bind(C, name="rk2_kappa_probe")
       real(c_double), intent(out) :: vmin, vmax

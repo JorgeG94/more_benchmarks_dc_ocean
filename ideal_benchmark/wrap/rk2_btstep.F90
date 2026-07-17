@@ -6,16 +6,22 @@ module rk2_btstep_mod
    use, intrinsic :: iso_c_binding, only: c_int, c_double
    use constants, only: wp
    use bt_state, only: hgrid_t, ocean_metrics_t, coriolis_t, bt_work_t
-   use btstep, only: btstep_nonlinear_closed_fused
+   use btstep, only: btstep_nonlinear_closed_fused, btstep_nonlinear_closed
    implicit none
    private
-   public :: rk2_btstep_init, rk2_btstep_stage, rk2_btstep_stage_cuda, rk2_btstep_probe
+   public :: rk2_btstep_init, rk2_btstep_stage, rk2_btstep_stage_unopt, rk2_btstep_probe
+#ifndef RK2_NO_CUDA
+   public :: rk2_btstep_stage_cuda, rk2_btstep_stage_cuda_unopt
+#endif
 
    integer, parameter :: NGH = 3, N_INNER = 24
    real(wp), parameter :: DXM = 10000.0_wp, DYM = 10000.0_wp, DT_INNER = 12.0_wp
 
+#ifndef RK2_NO_CUDA
    interface
-      ! extern "C" btstep_opt_launch_flat (opt_kernel.cu) -- from btstep_bridge.F90.
+      ! opt: extern "C" btstep_opt_launch_flat (opt_kernel.cu). Last int selects
+      ! the opt CUDA path (0=fused). faithful: btstep_cuda_flat (shim_btstep.cu),
+      ! SAME flat arg list, last int = btstep_cuda_launch mode (0=faithful 11-loop).
       subroutine btstep_opt_launch_flat(eta, eta_new, H_ref, ubt, vbt, &
                                         ubt_prev, vbt_prev, rem_u, rem_v, &
                                         zeta, ke, ubt_sum, vbt_sum, eta_sum, &
@@ -37,7 +43,29 @@ module rk2_btstep_mod
          integer, value :: nx, ny, nghost, nx_phys, ny_phys, n_steps, opt_mode
          real(wp), value :: G, bebt, dt
       end subroutine btstep_opt_launch_flat
+      subroutine btstep_cuda_flat(eta, eta_new, H_ref, ubt, vbt, &
+                                        ubt_prev, vbt_prev, rem_u, rem_v, &
+                                        zeta, ke, ubt_sum, vbt_sum, eta_sum, &
+                                        uhbt_sum, vhbt_sum, &
+                                        dy_cu, dx_cv, iareaT, areaCu, areaCv, &
+                                        dxCu, dyCv, idxCu, idyCv, iareaBu, &
+                                        f_corner, force_u, force_v, &
+                                        nx, ny, nghost, nx_phys, ny_phys, &
+                                        G, bebt, dt, n_steps, mode) &
+         bind(C, name="btstep_cuda_flat")
+         import :: wp
+         real(wp) :: eta(*), eta_new(*), H_ref(*), ubt(*), vbt(*)
+         real(wp) :: ubt_prev(*), vbt_prev(*), rem_u(*), rem_v(*)
+         real(wp) :: zeta(*), ke(*), ubt_sum(*), vbt_sum(*), eta_sum(*)
+         real(wp) :: uhbt_sum(*), vhbt_sum(*)
+         real(wp) :: dy_cu(*), dx_cv(*), iareaT(*), areaCu(*), areaCv(*)
+         real(wp) :: dxCu(*), dyCv(*), idxCu(*), idyCv(*), iareaBu(*)
+         real(wp) :: f_corner(*), force_u(*), force_v(*)
+         integer, value :: nx, ny, nghost, nx_phys, ny_phys, n_steps, mode
+         real(wp), value :: G, bebt, dt
+      end subroutine btstep_cuda_flat
    end interface
+#endif
 
    type(hgrid_t), save :: grid
    type(ocean_metrics_t), save :: met
@@ -148,6 +176,11 @@ contains
       call btstep_nonlinear_closed_fused(grid, met, w, cor, force_u, force_v, N_INNER, DT_INNER)
    end subroutine rk2_btstep_stage
 
+   subroutine rk2_btstep_stage_unopt() bind(C, name="rk2_btstep_stage_unopt")
+      call btstep_nonlinear_closed(grid, met, w, cor, force_u, force_v, N_INNER, DT_INNER)
+   end subroutine rk2_btstep_stage_unopt
+
+#ifndef RK2_NO_CUDA
    subroutine rk2_btstep_stage_cuda() bind(C, name="rk2_btstep_stage_cuda")
       integer :: nx, ny
       nx = grid%nx_total; ny = grid%ny_total
@@ -169,6 +202,30 @@ contains
                                   w%g_bt, w%bebt, DT_INNER, N_INNER, 0)
       !$acc end host_data
    end subroutine rk2_btstep_stage_cuda
+
+   subroutine rk2_btstep_stage_cuda_unopt() bind(C, name="rk2_btstep_stage_cuda_unopt")
+      ! Faithful CUDA: btstep_cuda_flat -> btstep_cuda_launch(&BtArgs, N_INNER, 0).
+      integer :: nx, ny
+      nx = grid%nx_total; ny = grid%ny_total
+      !$acc host_data use_device(w%bt_eta, w%bt_eta_new, w%bt_H_ref, w%bt_ubt, w%bt_vbt, &
+      !$acc                      w%bt_ubt_prev, w%bt_vbt_prev, w%bt_rem_u, w%bt_rem_v, &
+      !$acc                      w%bt_zeta_corner, w%bt_ke_centre, w%ubt_sum, w%vbt_sum, &
+      !$acc                      w%eta_sum, w%uhbt_sum, w%vhbt_sum, &
+      !$acc                      met%dy_cu, met%dx_cv, met%iareaT, met%areaCu, met%areaCv, &
+      !$acc                      met%dxCu, met%dyCv, met%idxCu, met%idyCv, met%iareaBu, &
+      !$acc                      cor%f_corner, force_u, force_v)
+      call btstep_cuda_flat(w%bt_eta, w%bt_eta_new, w%bt_H_ref, w%bt_ubt, w%bt_vbt, &
+                                  w%bt_ubt_prev, w%bt_vbt_prev, w%bt_rem_u, w%bt_rem_v, &
+                                  w%bt_zeta_corner, w%bt_ke_centre, w%ubt_sum, w%vbt_sum, &
+                                  w%eta_sum, w%uhbt_sum, w%vhbt_sum, &
+                                  met%dy_cu, met%dx_cv, met%iareaT, met%areaCu, met%areaCv, &
+                                  met%dxCu, met%dyCv, met%idxCu, met%idyCv, met%iareaBu, &
+                                  cor%f_corner, force_u, force_v, &
+                                  nx, ny, grid%nghost, grid%nx_phys, grid%ny_phys, &
+                                  w%g_bt, w%bebt, DT_INNER, N_INNER, 0)
+      !$acc end host_data
+   end subroutine rk2_btstep_stage_cuda_unopt
+#endif
 
    subroutine rk2_btstep_probe(vmin, vmax) bind(C, name="rk2_btstep_probe")
       real(c_double), intent(out) :: vmin, vmax

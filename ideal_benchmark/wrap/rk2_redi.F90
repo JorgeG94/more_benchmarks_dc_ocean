@@ -11,16 +11,20 @@ module rk2_redi_mod
    use multilayer_cgrid_state, only: multilayer_cgrid_state_t
    use ocean_eos, only: ocean_eos_t
    use ocean_boundary_types, only: ocean_bc_state_t, OBC_WALL
-   use ocean_redi, only: ocean_redi_t, redi_calc_coeffs, redi_apply_flux_hoist
+   use ocean_redi, only: ocean_redi_t, redi_calc_coeffs, redi_apply_flux_hoist, redi_apply_flux
    implicit none
    private
-   public :: rk2_redi_init, rk2_redi_stage, rk2_redi_stage_cuda, rk2_redi_probe
+   public :: rk2_redi_init, rk2_redi_stage, rk2_redi_stage_unopt, rk2_redi_probe
+#ifndef RK2_NO_CUDA
+   public :: rk2_redi_stage_cuda, rk2_redi_stage_cuda_unopt
+#endif
 
    integer, parameter :: NGHOST = 3
    real(wp), parameter :: DT = 900.0_wp
 
+#ifndef RK2_NO_CUDA
    interface
-      ! extern "C" redi_opt_launch (opt_kernel.cu) -- lifted from redi_bridge.F90.
+      ! opt: extern "C" redi_opt_launch (opt_kernel.cu) -- from redi_bridge.F90.
       subroutine redi_opt_launch(nx, ny, nz, ns, dt, nghost, nxp, nyp, &
                                  ww, we, wsz, wn, rho0, T_ref, S_ref, alpha_T, beta_S, &
                                  h_layer, t_htr, s_htr, wet_u, wet_v, &
@@ -38,7 +42,27 @@ module rk2_redi_mod
          real(wp) :: khtr_u_ext(*), khtr_v_ext(*), khtr_u(*), khtr_v(*)
          real(wp) :: dy_cu(*), dx_cv(*), idxCu(*), idyCv(*), areaT(*), tr_snap(*)
       end subroutine redi_opt_launch
+      ! faithful: extern "C" redi_cuda_launch_ (redi_kernel.cu) -- all scalars by
+      ! reference (Fortran-style trailing underscore), same array roles.
+      subroutine redi_cuda_launch(nx, ny, nz, ns, dt, nghost, nxp, nyp, &
+                                 ww, we, wsz, wn, rho0, T_ref, S_ref, alpha_T, beta_S, &
+                                 h_layer, t_htr, s_htr, wet_u, wet_v, &
+                                 uPoL, uPoR, uKoL, uKoR, uhEff, &
+                                 vPoL, vPoR, vKoL, vKoR, vhEff, &
+                                 khtr_u_ext, khtr_v_ext, khtr_u, khtr_v, &
+                                 dy_cu, dx_cv, idxCu, idyCv, areaT, tr_snap) &
+         bind(C, name="redi_cuda_launch_")
+         import :: wp
+         integer :: nx, ny, nz, ns, nghost, nxp, nyp, ww, we, wsz, wn
+         real(wp) :: dt, rho0, T_ref, S_ref, alpha_T, beta_S
+         real(wp) :: h_layer(*), t_htr(*), s_htr(*), wet_u(*), wet_v(*)
+         real(wp) :: uPoL(*), uPoR(*), uhEff(*), vPoL(*), vPoR(*), vhEff(*)
+         integer :: uKoL(*), uKoR(*), vKoL(*), vKoR(*)
+         real(wp) :: khtr_u_ext(*), khtr_v_ext(*), khtr_u(*), khtr_v(*)
+         real(wp) :: dy_cu(*), dx_cv(*), idxCu(*), idyCv(*), areaT(*), tr_snap(*)
+      end subroutine redi_cuda_launch
    end interface
+#endif
 
    type(hgrid_t), save :: grid
    type(ocean_metrics_t), save :: metrics
@@ -111,6 +135,13 @@ contains
       call redi_apply_flux_hoist(grid, metrics, redi, ms, DT, khtr_u_ext, khtr_v_ext, bc)
    end subroutine rk2_redi_stage
 
+   subroutine rk2_redi_stage_unopt() bind(C, name="rk2_redi_stage_unopt")
+      ! Faithful: Phase A calc-coeffs + the NON-hoist apply-flux.
+      call redi_calc_coeffs(grid, metrics, eos, redi, ms)
+      call redi_apply_flux(grid, metrics, redi, ms, DT, khtr_u_ext, khtr_v_ext, bc)
+   end subroutine rk2_redi_stage_unopt
+
+#ifndef RK2_NO_CUDA
    subroutine rk2_redi_stage_cuda() bind(C, name="rk2_redi_stage_cuda")
       ! One optimized CUDA launch = Phase A calc-coeffs + hoisted apply-flux,
       ! on the SAME device arrays rk2_redi_init entered. Lifted from redi_bridge.
@@ -135,6 +166,31 @@ contains
                            metrics%areaT, redi%tr_snap)
       !$acc end host_data
    end subroutine rk2_redi_stage_cuda
+
+   subroutine rk2_redi_stage_cuda_unopt() bind(C, name="rk2_redi_stage_cuda_unopt")
+      ! Faithful CUDA: redi_cuda_launch_ = Phase A + NON-hoist apply-flux.
+      integer :: nx, ny, nz, ns
+      nx = grid%nx_total; ny = grid%ny_total; nz = ms%nz_ml; ns = redi%nsurf
+      !$acc host_data use_device(ms%h_layer, ms%tracers(1)%hTr, ms%tracers(2)%hTr, &
+      !$acc                      metrics%wet_u, metrics%wet_v, &
+      !$acc                      redi%uPoL, redi%uPoR, redi%uKoL, redi%uKoR, redi%uhEff, &
+      !$acc                      redi%vPoL, redi%vPoR, redi%vKoL, redi%vKoR, redi%vhEff, &
+      !$acc                      khtr_u_ext, khtr_v_ext, redi%khtr_u, redi%khtr_v, &
+      !$acc                      metrics%dy_cu, metrics%dx_cv, metrics%idxCu, metrics%idyCv, &
+      !$acc                      metrics%areaT, redi%tr_snap)
+      call redi_cuda_launch(nx, ny, nz, ns, DT, grid%nghost, grid%nx_phys, grid%ny_phys, &
+                           1, 1, 1, 1, &
+                           eos%rho0, eos%T_ref, eos%S_ref, eos%alpha_T, eos%beta_S, &
+                           ms%h_layer, ms%tracers(1)%hTr, ms%tracers(2)%hTr, &
+                           metrics%wet_u, metrics%wet_v, &
+                           redi%uPoL, redi%uPoR, redi%uKoL, redi%uKoR, redi%uhEff, &
+                           redi%vPoL, redi%vPoR, redi%vKoL, redi%vKoR, redi%vhEff, &
+                           khtr_u_ext, khtr_v_ext, redi%khtr_u, redi%khtr_v, &
+                           metrics%dy_cu, metrics%dx_cv, metrics%idxCu, metrics%idyCv, &
+                           metrics%areaT, redi%tr_snap)
+      !$acc end host_data
+   end subroutine rk2_redi_stage_cuda_unopt
+#endif
 
    subroutine rk2_redi_probe(vmin, vmax) bind(C, name="rk2_redi_probe")
       real(c_double), intent(out) :: vmin, vmax

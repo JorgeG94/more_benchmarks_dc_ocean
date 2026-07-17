@@ -14,10 +14,16 @@ module rk2_epbl_mod
    use ocean_epbl, only: ocean_epbl_t, epbl_column_kernel
    implicit none
    private
-   public :: rk2_epbl_init, rk2_epbl_stage, rk2_epbl_stage_cuda, rk2_epbl_probe
+   ! epbl has NO opt DC variant: opt DC == unopt DC == epbl_column_kernel.
+   public :: rk2_epbl_init, rk2_epbl_stage, rk2_epbl_stage_unopt, rk2_epbl_probe
+#ifndef RK2_NO_CUDA
+   public :: rk2_epbl_stage_cuda, rk2_epbl_stage_cuda_unopt
+#endif
 
+#ifndef RK2_NO_CUDA
    interface
-      ! flat shim (ideal_benchmark/shim_epbl.cu) -> epbl_opt_launch (opt_kernel.cu).
+      ! flat shims (ideal_benchmark/shim_epbl.cu). Identical signatures; opt ->
+      ! epbl_opt_launch (tuned), unopt -> epbl_cuda_launch (faithful, variant 0).
       subroutine epbl_opt_flat(h_layer, wet_mask, hT, hS, tau_x, tau_y, Q_heat, Q_salt, &
                                f_centre, mld, kd_int, la, t0, s0, dpe_t, dpe_s, dcolht_t, dcolht_s, &
                                tke_wind, tke_conv, tke_forcing, tke_mixing, tke_mech_decay, tke_conv_decay, &
@@ -32,7 +38,22 @@ module rk2_epbl_mod
          real(c_double), value :: inv_rho0_cp, inv_rho0, dt
          integer(c_int), value :: nx, ny, nz, mld_max_its, sync
       end subroutine epbl_opt_flat
+      subroutine epbl_cuda_flat(h_layer, wet_mask, hT, hS, tau_x, tau_y, Q_heat, Q_salt, &
+                               f_centre, mld, kd_int, la, t0, s0, dpe_t, dpe_s, dcolht_t, dcolht_s, &
+                               tke_wind, tke_conv, tke_forcing, tke_mixing, tke_mech_decay, tke_conv_decay, &
+                               inv_rho0_cp, inv_rho0, dt, nx, ny, nz, mld_max_its, sync) &
+         bind(C, name="epbl_cuda_flat")
+         import :: wp, c_int, c_double
+         real(wp) :: h_layer(*), wet_mask(*), hT(*), hS(*), tau_x(*), tau_y(*)
+         real(wp) :: Q_heat(*), Q_salt(*), f_centre(*), mld(*), kd_int(*), la(*)
+         real(wp) :: t0(*), s0(*), dpe_t(*), dpe_s(*), dcolht_t(*), dcolht_s(*)
+         real(wp) :: tke_wind(*), tke_conv(*), tke_forcing(*), tke_mixing(*)
+         real(wp) :: tke_mech_decay(*), tke_conv_decay(*)
+         real(c_double), value :: inv_rho0_cp, inv_rho0, dt
+         integer(c_int), value :: nx, ny, nz, mld_max_its, sync
+      end subroutine epbl_cuda_flat
    end interface
+#endif
 
    integer, parameter :: NGHOST = 3
    integer, parameter :: BATHY_NX = 473, BATHY_NY = 297
@@ -216,6 +237,12 @@ contains
                               sf%Q_salt, inv_rho0, gnx, gny)
    end subroutine rk2_epbl_stage
 
+   subroutine rk2_epbl_stage_unopt() bind(C, name="rk2_epbl_stage_unopt")
+      call epbl_column_kernel(grid, e_dc, ms, hT, hS, ss, DT, sf%Q_heat, inv_rho0_cp, &
+                              sf%Q_salt, inv_rho0, gnx, gny)
+   end subroutine rk2_epbl_stage_unopt
+
+#ifndef RK2_NO_CUDA
    subroutine rk2_epbl_stage_cuda() bind(C, name="rk2_epbl_stage_cuda")
       !$acc host_data use_device(ms%h_layer, ms%wet_mask, hT, hS, ss%tau_x, ss%tau_y, &
       !$acc                      sf%Q_heat, sf%Q_salt, e_dc%f_centre, e_dc%mld, e_dc%kd_int, &
@@ -232,6 +259,24 @@ contains
                          inv_rho0_cp, inv_rho0, DT, gnx, gny, ms%nz_ml, MAX_ITS, 0)
       !$acc end host_data
    end subroutine rk2_epbl_stage_cuda
+
+   subroutine rk2_epbl_stage_cuda_unopt() bind(C, name="rk2_epbl_stage_cuda_unopt")
+      !$acc host_data use_device(ms%h_layer, ms%wet_mask, hT, hS, ss%tau_x, ss%tau_y, &
+      !$acc                      sf%Q_heat, sf%Q_salt, e_dc%f_centre, e_dc%mld, e_dc%kd_int, &
+      !$acc                      e_dc%la, e_dc%t0%data, e_dc%s0%data, e_dc%dpe_t%data, &
+      !$acc                      e_dc%dpe_s%data, e_dc%dcolht_t%data, e_dc%dcolht_s%data, &
+      !$acc                      e_dc%tke_wind, e_dc%tke_conv, e_dc%tke_forcing, e_dc%tke_mixing, &
+      !$acc                      e_dc%tke_mech_decay, e_dc%tke_conv_decay)
+      call epbl_cuda_flat(ms%h_layer, ms%wet_mask, hT, hS, ss%tau_x, ss%tau_y, &
+                          sf%Q_heat, sf%Q_salt, e_dc%f_centre, e_dc%mld, e_dc%kd_int, e_dc%la, &
+                          e_dc%t0%data, e_dc%s0%data, e_dc%dpe_t%data, e_dc%dpe_s%data, &
+                          e_dc%dcolht_t%data, e_dc%dcolht_s%data, &
+                          e_dc%tke_wind, e_dc%tke_conv, e_dc%tke_forcing, e_dc%tke_mixing, &
+                          e_dc%tke_mech_decay, e_dc%tke_conv_decay, &
+                          inv_rho0_cp, inv_rho0, DT, gnx, gny, ms%nz_ml, MAX_ITS, 0)
+      !$acc end host_data
+   end subroutine rk2_epbl_stage_cuda_unopt
+#endif
 
    subroutine rk2_epbl_probe(vmin, vmax) bind(C, name="rk2_epbl_probe")
       real(c_double), intent(out) :: vmin, vmax

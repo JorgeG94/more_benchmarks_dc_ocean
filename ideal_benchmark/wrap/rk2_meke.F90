@@ -6,10 +6,13 @@ module rk2_meke_mod
    use, intrinsic :: iso_c_binding, only: c_int, c_double
    use constants, only: wp
    use meke_state, only: ocean_metrics_t, multilayer_cgrid_state_t, ocean_gm_t, ocean_meke_t
-   use meke, only: meke_step_ext_fused
+   use meke, only: meke_step_ext_fused, meke_step_ext
    implicit none
    private
-   public :: rk2_meke_init, rk2_meke_stage, rk2_meke_stage_cuda, rk2_meke_probe
+   public :: rk2_meke_init, rk2_meke_stage, rk2_meke_stage_unopt, rk2_meke_probe
+#ifndef RK2_NO_CUDA
+   public :: rk2_meke_stage_cuda, rk2_meke_stage_cuda_unopt
+#endif
 
    integer, parameter :: NGH = 3
    real(wp), parameter :: DXM = 8000.0_wp, DYM = 8000.0_wp, DT_THERMO = 1800.0_wp
@@ -21,8 +24,9 @@ module rk2_meke_mod
    real(wp), allocatable, target, save :: ke_diss_ext(:, :), scratch(:, :)
    integer, save :: gnx, gny, gnz
 
+#ifndef RK2_NO_CUDA
    interface
-      ! extern "C" meke_opt_launch_flat (opt_kernel.cu) -- from meke_bridge.F90.
+      ! opt: extern "C" meke_opt_launch_flat (opt_kernel.cu) -- from meke_bridge.F90.
       subroutine meke_opt_launch_flat( &
          meke, kh_diff, le, ku, i_mass, depth_tot, bottom_fac2, barotr_fac2, src, &
          uflux, vflux, mass_ws, rd_ws, sn_u_ws, sn_v_ws, ke_diss_ws, &
@@ -49,7 +53,35 @@ module rk2_meke_mod
          real(wp), value :: bgsrc, gmcoeff, frcoeff, damping
          real(wp), value :: kh_bg, k4, khmeke_fac, khcoeff, visc_coeff_ku, rho0
       end subroutine meke_opt_launch_flat
+      ! faithful: meke_cuda_flat (shim_meke.cu) -> meke_cuda_launch(&MekeArgs, 0).
+      ! Same flat args MINUS meke_scratch (the faithful path has no double-buffer).
+      subroutine meke_cuda_flat( &
+         meke, kh_diff, le, ku, i_mass, depth_tot, bottom_fac2, barotr_fac2, src, &
+         uflux, vflux, mass_ws, rd_ws, sn_u_ws, sn_v_ws, ke_diss_ws, &
+         u_bbl2, f_centre, gm_src, ke_diss_ext, h_layer, rho_layer, &
+         areaT, iareaT, idxT, idyT, dy_cu, dx_cv, idxCu, idyCv, &
+         nx, ny, nz, &
+         dt, dtscale, cd_scale, cb, ct, min_gamma2, cdrag, uscale, &
+         a_deform, a_rhines, a_eady, a_frict, a_grid, &
+         bgsrc, gmcoeff, frcoeff, damping, &
+         kh_bg, k4, khmeke_fac, khcoeff, visc_coeff_ku, rho0, backscatter) &
+         bind(C, name="meke_cuda_flat")
+         import :: wp, c_int
+         real(wp) :: meke(*), kh_diff(*), le(*), ku(*), i_mass(*), depth_tot(*)
+         real(wp) :: bottom_fac2(*), barotr_fac2(*), src(*), uflux(*), vflux(*)
+         real(wp) :: mass_ws(*), rd_ws(*), sn_u_ws(*), sn_v_ws(*), ke_diss_ws(*)
+         real(wp) :: u_bbl2(*), f_centre(*), gm_src(*), ke_diss_ext(*)
+         real(wp) :: h_layer(*), rho_layer(*)
+         real(wp) :: areaT(*), iareaT(*), idxT(*), idyT(*)
+         real(wp) :: dy_cu(*), dx_cv(*), idxCu(*), idyCv(*)
+         integer(c_int), value :: nx, ny, nz, backscatter
+         real(wp), value :: dt, dtscale, cd_scale, cb, ct, min_gamma2, cdrag, uscale
+         real(wp), value :: a_deform, a_rhines, a_eady, a_frict, a_grid
+         real(wp), value :: bgsrc, gmcoeff, frcoeff, damping
+         real(wp), value :: kh_bg, k4, khmeke_fac, khcoeff, visc_coeff_ku, rho0
+      end subroutine meke_cuda_flat
    end interface
+#endif
 
 contains
 
@@ -173,6 +205,11 @@ contains
       call meke_step_ext_fused(gnx, gny, gnz, m, met, gm, ms, DT_THERMO, ke_diss_ext)
    end subroutine rk2_meke_stage
 
+   subroutine rk2_meke_stage_unopt() bind(C, name="rk2_meke_stage_unopt")
+      call meke_step_ext(gnx, gny, gnz, m, met, gm, ms, DT_THERMO, ke_diss_ext)
+   end subroutine rk2_meke_stage_unopt
+
+#ifndef RK2_NO_CUDA
    subroutine rk2_meke_stage_cuda() bind(C, name="rk2_meke_stage_cuda")
       integer(c_int) :: bscat
       bscat = 0
@@ -198,6 +235,32 @@ contains
          scratch)
       !$acc end host_data
    end subroutine rk2_meke_stage_cuda
+
+   subroutine rk2_meke_stage_cuda_unopt() bind(C, name="rk2_meke_stage_cuda_unopt")
+      integer(c_int) :: bscat
+      bscat = 0
+      if (m%backscatter) bscat = 1
+      !$acc host_data use_device(m%meke, m%kh_diff, m%le, m%ku, m%i_mass, &
+      !$acc   m%depth_tot, m%bottom_fac2, m%barotr_fac2, m%src, m%uflux, m%vflux, &
+      !$acc   m%mass_ws, m%rd_ws, m%sn_u_ws, m%sn_v_ws, m%ke_diss_ws, &
+      !$acc   m%u_bbl2, m%f_centre, gm%gm_src, ke_diss_ext, ms%h_layer, ms%rho_layer, &
+      !$acc   met%areaT, met%iareaT, met%idxT, met%idyT, met%dy_cu, met%dx_cv, &
+      !$acc   met%idxCu, met%idyCv)
+      call meke_cuda_flat( &
+         m%meke, m%kh_diff, m%le, m%ku, m%i_mass, m%depth_tot, m%bottom_fac2, &
+         m%barotr_fac2, m%src, m%uflux, m%vflux, m%mass_ws, m%rd_ws, &
+         m%sn_u_ws, m%sn_v_ws, m%ke_diss_ws, &
+         m%u_bbl2, m%f_centre, gm%gm_src, ke_diss_ext, ms%h_layer, ms%rho_layer, &
+         met%areaT, met%iareaT, met%idxT, met%idyT, met%dy_cu, met%dx_cv, &
+         met%idxCu, met%idyCv, &
+         gnx, gny, gnz, &
+         DT_THERMO, m%dtscale, m%cd_scale, m%cb, m%ct, m%min_gamma2, m%cdrag, m%uscale, &
+         m%alpha_deform, m%alpha_rhines, m%alpha_eady, m%alpha_frict, m%alpha_grid, &
+         m%bgsrc, m%gmcoeff, m%frcoeff, m%damping, &
+         m%kh, m%k4, m%khmeke_fac, m%khcoeff, m%visc_coeff_ku, gm%rho0, bscat)
+      !$acc end host_data
+   end subroutine rk2_meke_stage_cuda_unopt
+#endif
 
    subroutine rk2_meke_probe(vmin, vmax) bind(C, name="rk2_meke_probe")
       real(c_double), intent(out) :: vmin, vmax

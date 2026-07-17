@@ -8,16 +8,21 @@ module rk2_continuity_mod
    use grid, only: hgrid_t
    use ocean_metrics, only: ocean_metrics_t
    use multilayer_cgrid_state, only: multilayer_cgrid_state_t
-   use continuity_layered, only: continuity_t, continuity_compute_fluxes_fused
+   use continuity_layered, only: continuity_t, continuity_compute_fluxes_fused, &
+                                 continuity_compute_fluxes
    implicit none
    private
-   public :: rk2_continuity_init, rk2_continuity_stage, rk2_continuity_stage_cuda, rk2_continuity_probe
+   public :: rk2_continuity_init, rk2_continuity_stage, rk2_continuity_stage_unopt, rk2_continuity_probe
+#ifndef RK2_NO_CUDA
+   public :: rk2_continuity_stage_cuda, rk2_continuity_stage_cuda_unopt
+#endif
 
    integer, parameter :: NGHOST = 3
    real(wp), parameter :: DX = 10.0_wp, DY = 10.0_wp
 
+#ifndef RK2_NO_CUDA
    interface
-      ! extern "C" in continuity_layered/opt_kernel.cu (all scalars by value).
+      ! opt: extern "C" continuity_opt_launch (opt_kernel.cu, scalars by value).
       subroutine continuity_opt_launch(h, u, v, wet_T, dy_cu, dx_cv, iareaT, &
                                        mfx, mfy, fh, nx, ny, nz, nghost, nx_phys, ny_phys, &
                                        do_pos, h_min_pos) bind(C, name="continuity_opt_launch")
@@ -27,7 +32,19 @@ module rk2_continuity_mod
          integer(c_int), value :: nx, ny, nz, nghost, nx_phys, ny_phys, do_pos
          real(c_double), value :: h_min_pos
       end subroutine continuity_opt_launch
+      ! faithful: extern "C" continuity_layered_cuda_launch (layered_kernel.cu).
+      subroutine continuity_layered_cuda_launch(h, u, v, wet_T, dy_cu, dx_cv, iareaT, &
+                                       hfl_x, hfr_x, hfl_y, hfr_y, mfx, mfy, fh, &
+                                       nx, ny, nz, nghost, nx_phys, ny_phys, &
+                                       do_pos, h_min_pos, sync) bind(C, name="continuity_layered_cuda_launch")
+         import :: wp, c_int, c_double
+         real(wp) :: h(*), u(*), v(*), wet_T(*), dy_cu(*), dx_cv(*), iareaT(*)
+         real(wp) :: hfl_x(*), hfr_x(*), hfl_y(*), hfr_y(*), mfx(*), mfy(*), fh(*)
+         integer(c_int), value :: nx, ny, nz, nghost, nx_phys, ny_phys, do_pos, sync
+         real(c_double), value :: h_min_pos
+      end subroutine continuity_layered_cuda_launch
    end interface
+#endif
 
    type(hgrid_t), save :: grid
    type(ocean_metrics_t), save :: metrics
@@ -126,6 +143,11 @@ contains
       call continuity_compute_fluxes_fused(grid, metrics, cont, ms)
    end subroutine rk2_continuity_stage
 
+   subroutine rk2_continuity_stage_unopt() bind(C, name="rk2_continuity_stage_unopt")
+      call continuity_compute_fluxes(grid, metrics, cont, ms)
+   end subroutine rk2_continuity_stage_unopt
+
+#ifndef RK2_NO_CUDA
    subroutine rk2_continuity_stage_cuda() bind(C, name="rk2_continuity_stage_cuda")
       integer :: do_pos
       do_pos = 0
@@ -140,6 +162,26 @@ contains
                                  grid%nx_phys, grid%ny_phys, do_pos, cont%h_min)
       !$acc end host_data
    end subroutine rk2_continuity_stage_cuda
+
+   subroutine rk2_continuity_stage_cuda_unopt() bind(C, name="rk2_continuity_stage_cuda_unopt")
+      integer :: do_pos
+      do_pos = 0
+      if (cont%use_ppm_limit_pos) do_pos = 1
+      !$acc host_data use_device(ms%h_layer, ms%u_face_x_layer, ms%v_face_y_layer, &
+      !$acc                      metrics%wet_T, metrics%dy_cu, metrics%dx_cv, metrics%iareaT, &
+      !$acc                      cont%h_face_left_x%data, cont%h_face_right_x%data, &
+      !$acc                      cont%h_face_left_y%data, cont%h_face_right_y%data, &
+      !$acc                      ms%mass_flux_x_layer, ms%mass_flux_y_layer, ms%flux_h_layer)
+      call continuity_layered_cuda_launch(ms%h_layer, ms%u_face_x_layer, ms%v_face_y_layer, &
+                                 metrics%wet_T, metrics%dy_cu, metrics%dx_cv, metrics%iareaT, &
+                                 cont%h_face_left_x%data, cont%h_face_right_x%data, &
+                                 cont%h_face_left_y%data, cont%h_face_right_y%data, &
+                                 ms%mass_flux_x_layer, ms%mass_flux_y_layer, ms%flux_h_layer, &
+                                 grid%nx_total, grid%ny_total, ms%nz_ml, grid%nghost, &
+                                 grid%nx_phys, grid%ny_phys, do_pos, cont%h_min, 0)
+      !$acc end host_data
+   end subroutine rk2_continuity_stage_cuda_unopt
+#endif
 
    subroutine rk2_continuity_probe(vmin, vmax) bind(C, name="rk2_continuity_probe")
       real(c_double), intent(out) :: vmin, vmax

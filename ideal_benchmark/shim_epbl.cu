@@ -17,7 +17,9 @@
 #define EPBL_LT_RESCALE      1
 #define EOS_VARIANT_LINEAR   1
 
-// the OPTIMIZED launcher (opt_kernel.cu), distinct from epbl_cuda_launch.
+#define EPBL_LB_THREADS_DEFAULT 128
+
+// opt launcher (opt_kernel.cu) + faithful launcher (epbl_kernel.cu, +variant/threads).
 extern "C" void epbl_opt_launch(
    const double *h_layer, const double *wet_mask, const double *hT, const double *hS,
    const double *tau_x, const double *tau_y, const double *Q_heat, const double *Q_salt,
@@ -26,26 +28,17 @@ extern "C" void epbl_opt_launch(
    double *tke_wind, double *tke_conv, double *tke_forcing, double *tke_mixing,
    double *tke_mech_decay, double *tke_conv_decay,
    int *its_used, const EpblParams *Pin, int sync);
-
-extern "C" void epbl_opt_flat(
+extern "C" void epbl_cuda_launch(
    const double *h_layer, const double *wet_mask, const double *hT, const double *hS,
    const double *tau_x, const double *tau_y, const double *Q_heat, const double *Q_salt,
    const double *f_centre, double *mld, double *kd_int, double *la, double *t0, double *s0,
    double *dpe_t, double *dpe_s, double *dcolht_t, double *dcolht_s,
    double *tke_wind, double *tke_conv, double *tke_forcing, double *tke_mixing,
    double *tke_mech_decay, double *tke_conv_decay,
-   double inv_rho0_cp, double inv_rho0, double dt,
-   int nx, int ny, int nz, int mld_max_its, int sync)
-{
-   static int *its = nullptr;
-   static long cap = 0;
-   long ncol = (long)nx * (long)ny;
-   if (ncol > cap) {
-      if (its) cudaFree(its);
-      cudaMalloc(&its, ncol * sizeof(int));
-      cap = ncol;
-   }
-   EpblParams P;
+   int *its_used, const EpblParams *Pin, int variant, int threads, int sync);
+
+static void fill_epbl(EpblParams &P, double inv_rho0_cp, double inv_rho0, double dt,
+                      int nx, int ny, int nz, int mld_max_its) {
    P.mstar_scheme = EPBL_MSTAR_OM4; P.vstar_scheme = EPBL_VSTAR_CUBE_ROOT; P.combine_mode = EPBL_COMBINE_ADD;
    P.mstar_const = 1.2; P.mstar_cap = -1.0; P.mstar_coef1 = 0.3;
    P.c_ek = 0.085; P.mstar_conv_adj = 0.0;
@@ -67,8 +60,47 @@ extern "C" void epbl_opt_flat(
    P.eos_alpha_T = 0.2; P.eos_beta_S = 7.6e-4; P.eos_p_ref = 0.0;
    P.inv_rho0_cp = inv_rho0_cp; P.inv_rho0 = inv_rho0; P.dt = dt;
    P.nx = nx; P.ny = ny; P.nz = nz;
+}
+
+static int *g_its = nullptr;
+static long g_cap = 0;
+static void ensure_its(long ncol) {
+   if (ncol > g_cap) { if (g_its) cudaFree(g_its); cudaMalloc(&g_its, ncol * sizeof(int)); g_cap = ncol; }
+}
+
+extern "C" void epbl_opt_flat(
+   const double *h_layer, const double *wet_mask, const double *hT, const double *hS,
+   const double *tau_x, const double *tau_y, const double *Q_heat, const double *Q_salt,
+   const double *f_centre, double *mld, double *kd_int, double *la, double *t0, double *s0,
+   double *dpe_t, double *dpe_s, double *dcolht_t, double *dcolht_s,
+   double *tke_wind, double *tke_conv, double *tke_forcing, double *tke_mixing,
+   double *tke_mech_decay, double *tke_conv_decay,
+   double inv_rho0_cp, double inv_rho0, double dt,
+   int nx, int ny, int nz, int mld_max_its, int sync)
+{
+   ensure_its((long)nx * (long)ny);
+   EpblParams P; fill_epbl(P, inv_rho0_cp, inv_rho0, dt, nx, ny, nz, mld_max_its);
    epbl_opt_launch(h_layer, wet_mask, hT, hS, tau_x, tau_y, Q_heat, Q_salt, f_centre,
                    mld, kd_int, la, t0, s0, dpe_t, dpe_s, dcolht_t, dcolht_s,
                    tke_wind, tke_conv, tke_forcing, tke_mixing, tke_mech_decay, tke_conv_decay,
-                   its, &P, sync);
+                   g_its, &P, sync);
+}
+
+extern "C" void epbl_cuda_flat(
+   const double *h_layer, const double *wet_mask, const double *hT, const double *hS,
+   const double *tau_x, const double *tau_y, const double *Q_heat, const double *Q_salt,
+   const double *f_centre, double *mld, double *kd_int, double *la, double *t0, double *s0,
+   double *dpe_t, double *dpe_s, double *dcolht_t, double *dcolht_s,
+   double *tke_wind, double *tke_conv, double *tke_forcing, double *tke_mixing,
+   double *tke_mech_decay, double *tke_conv_decay,
+   double inv_rho0_cp, double inv_rho0, double dt,
+   int nx, int ny, int nz, int mld_max_its, int sync)
+{
+   ensure_its((long)nx * (long)ny);
+   EpblParams P; fill_epbl(P, inv_rho0_cp, inv_rho0, dt, nx, ny, nz, mld_max_its);
+   // variant 0 = epbl_faithful; threads = block size for the faithful kernel.
+   epbl_cuda_launch(h_layer, wet_mask, hT, hS, tau_x, tau_y, Q_heat, Q_salt, f_centre,
+                    mld, kd_int, la, t0, s0, dpe_t, dpe_s, dcolht_t, dcolht_s,
+                    tke_wind, tke_conv, tke_forcing, tke_mixing, tke_mech_decay, tke_conv_decay,
+                    g_its, &P, 0, EPBL_LB_THREADS_DEFAULT, sync);
 }
