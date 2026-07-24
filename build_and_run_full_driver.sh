@@ -54,11 +54,18 @@ else
 fi
 
 echo "$out"
-csv="$DATADIR/full_driver_$(stamp).csv"
-csv_init "$csv" "target,mode,version,nx,ny,nz,ms_per_stage,ms_per_step"
+
+# provenance (whole-model harness: nvfortran+nvcc on GPU, $FC on CPU) ----------
+if [ "$target" = cpu ]; then wm_fc="$FC"; wm_dev="$(device_for dc_serial)"; else wm_fc=nvfortran; wm_dev="$(device_for dc_gpu_acc)"; fi
+wm_ver="$(fc_version "$wm_fc")"
+echo "  compiler : $wm_ver    device: $wm_dev    git: $GHASH  host: $HOSTN"
+
+# whole-model table: its own granularity (ms/stage), same provenance columns.
+csv="$DATADIR/full_driver_${TS}.csv"
+csv_init "$csv" "scope,target,mode,version,compiler,compiler_ver,device,nx,ny,nz,reps,warm,ms_per_stage,ms_per_step,git_hash,host,timestamp"
 echo "$out" | grep '^RESULT' | while read -r line; do
    # RESULT target=gpu mode=dc version=opt ms_per_stage=.. ms_per_step=..
    eval "$(echo "$line" | sed 's/^RESULT //; s/ /;/g' | tr ';' '\n' | sed 's/^/R_/')" 2>/dev/null
-   csv_row "$csv" "${R_target},${R_mode},${R_version},$NXP,$NYP,$NZ,${R_ms_per_stage},${R_ms_per_step}"
+   csv_row "$csv" "whole_model,${R_target},${R_mode},${R_version},$wm_fc,\"$(_q "$wm_ver")\",\"$(_q "$wm_dev")\",$NXP,$NYP,$NZ,$REPS,$WARM,${R_ms_per_stage},${R_ms_per_step},$GHASH,$HOSTN,$TS"
 done
 echo "  -> $csv"

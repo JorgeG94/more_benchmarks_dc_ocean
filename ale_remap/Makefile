@@ -140,5 +140,8 @@ verify:
 	@$(MAKE) --no-print-directory dc DATA=none
 	@DC_REF=h_ref.bin  ./dc_none $(VARGS)
 
-clean:
+# ---- serial do-loop build mode (committed serialdo/ sources) ---------------
+-include ../common/serialdo.mk
+
+clean: clean-serialdo
 	@rm -rf build dc_acc dc_omp dc_none dc_ab_acc dc_ab_omp dc_ab_none cpp_cuda cpp_hip cmp_acc h_ref.bin *.mod
