@@ -43,10 +43,24 @@ set -uo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 label="${1:-?}"; shift
 exec 9>"$DIR/gpu.lock"; flock 9
-for _ in $(seq 1 150); do
-  u=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
-  [ "${u:-100}" -lt 12 ] 2>/dev/null && break; sleep 2
-done
+# GPU utilisation, whichever vendor SMI exists. Prints nothing if neither does --
+# and a box with NO queryable SMI must NOT be idle-gated, or every run burns the
+# full 300 s timeout waiting for a number that never arrives.
+gpu_util() {
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' '
+  elif command -v rocm-smi >/dev/null 2>&1; then
+    rocm-smi --showuse 2>/dev/null | sed -n 's/.*use (%): *\([0-9]\+\).*/\1/p' | head -1
+  fi
+}
+if [ -n "$(gpu_util)" ]; then
+  for _ in $(seq 1 150); do
+    u=$(gpu_util)
+    [ "${u:-100}" -lt 12 ] 2>/dev/null && break; sleep 2
+  done
+else
+  u=n/a          # no queryable SMI (e.g. a Slurm-exclusive allocation): don't gate
+fi
 printf '%s  ACQUIRE %-16s util=%s%%  cmd: %s\n' "$(date +%T)" "$label" "${u:-?}" "$*" >> "$DIR/gpu.log"
 "$@"; rc=$?
 printf '%s  RELEASE %-16s exit=%s\n' "$(date +%T)" "$label" "$rc" >> "$DIR/gpu.log"
@@ -57,11 +71,22 @@ SH
 
 # ---- exclusive-GPU guard: the whole-model effect == contention noise --------
 gpu_assert_free() {
-   local n
-   n=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c . || true)
+   local n who
+   if command -v nvidia-smi >/dev/null 2>&1; then
+      n=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c . || true)
+      who=$(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader 2>/dev/null)
+   elif command -v rocm-smi >/dev/null 2>&1; then
+      # ROCm lists KFD processes; "No KFD PIDs currently running" means idle
+      who=$(rocm-smi --showpids 2>/dev/null | grep -E '^[0-9]+' || true)
+      n=$(printf '%s' "$who" | grep -c . || true)
+   else
+      echo "  NOTE: no nvidia-smi/rocm-smi -- cannot verify the GPU is exclusive." >&2
+      echo "        Assuming an exclusive allocation (e.g. Slurm). See NOTES_ON_PERF.md." >&2
+      return 0
+   fi
    if [ "${n:-0}" -gt 0 ]; then
       echo "  WARNING: ${n} compute app(s) already on the GPU -- timings may be contaminated:" >&2
-      nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader 2>/dev/null | sed 's/^/     /' >&2
+      printf '%s\n' "$who" | sed 's/^/     /' >&2
       if [ "${BENCH_FORCE:-0}" != 1 ]; then
          echo "  Refusing to run. Free the GPU, or set BENCH_FORCE=1 to override." >&2
          return 1
@@ -118,7 +143,16 @@ NCORES="$( (nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1
 
 fc_version() { command -v "$1" >/dev/null 2>&1 && "$1" --version 2>&1 | head -1 || echo unknown; }
 cpu_model()  { lscpu 2>/dev/null | sed -n 's/^Model name: *//p' | head -1 || true; }
-gpu_name()   { nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1; }
+# vendor-agnostic GPU model for the CSV's `device` column -- NVIDIA, then
+# ROCm's product name, then the bare gfx target. Empty if no GPU is queryable.
+gpu_name() {
+   local g
+   g="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)"
+   [ -n "$g" ] || g="$(rocm-smi --showproductname 2>/dev/null \
+        | sed -n 's/.*\(Card series\|Card model\|Card SKU\): *//p' | head -1 | tr -s ' ')"
+   [ -n "$g" ] || g="$(rocminfo 2>/dev/null | grep -oE 'gfx[0-9a-f]+' | head -1)"
+   printf '%s' "$g"
+}
 
 # device string for a mode: GPU modes -> GPU model, else the CPU model
 device_for() {
