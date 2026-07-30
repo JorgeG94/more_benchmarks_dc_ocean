@@ -94,3 +94,50 @@ build_run() {
 csv_init() { printf '%s\n' "$2" > "$1"; }         # file, header
 csv_row()  { printf '%s\n' "$2" >> "$1"; }        # file, row
 stamp()    { date +%Y%m%d_%H%M%S; }
+
+# ===========================================================================
+# Unified PROVENANCE schema -- shared by EVERY build_and_run_*.sh + run_all.sh
+# so results from any script / mode / machine stack into one table. Columns:
+#   kernel        the kernel dir (or whole_model for the RK2 driver)
+#   mode          serial_do | dc_serial | dc_multicore | dc_gpu_acc | dc_gpu_omp
+#                 | gpuc_cuda | gpuc_hip | rk2_*        (the strategy under test)
+#   compiler      FC (Fortran) or the GPU-C compiler (nvcc/hipcc)
+#   compiler_ver  its --version first line
+#   flags         the EXACT compile flags (quoted; may contain commas)
+#   threads       OMP threads (1 for serial/GPU-launcher, ncores for multicore)
+#   device        GPU model (nvidia-smi name) for GPU modes, else CPU model
+#   nx,ny,nz,reps,warm   the problem size (from benchmark_config.mk)
+#   ms_per_step   the timing (NaN on failure)
+#   git_hash,host,timestamp   provenance
+# ---------------------------------------------------------------------------
+CSV_COLS="kernel,mode,compiler,compiler_ver,flags,threads,device,nx,ny,nz,reps,warm,ms_per_step,git_hash,host,timestamp"
+GHASH="$(cd "$REPO" && git rev-parse --short HEAD 2>/dev/null || echo nogit)"
+HOSTN="$(hostname)"
+TS="$(stamp)"
+NCORES="$( (nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1) )"
+
+fc_version() { command -v "$1" >/dev/null 2>&1 && "$1" --version 2>&1 | head -1 || echo unknown; }
+cpu_model()  { lscpu 2>/dev/null | sed -n 's/^Model name: *//p' | head -1 || true; }
+gpu_name()   { nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1; }
+
+# device string for a mode: GPU modes -> GPU model, else the CPU model
+device_for() {
+   case "$1" in
+      dc_gpu*|gpuc_*|*cuda*|*hip*) local g; g="$(gpu_name)"; echo "${g:-gpu}";;
+      *) local c; c="$(cpu_model)"; echo "${c:-cpu}";;
+   esac
+}
+
+# make a quoted field CSV-safe: keep commas (the field is "-quoted, so RFC-4180
+# parsers handle them), just neutralise embedded quotes/newlines.
+_q() { printf '%s' "$1" | tr '\n"' " '"; }
+
+csv_new() { csv_init "$1" "$CSV_COLS"; }           # write the standard header
+
+# emit one provenance row (size/git/host/ts pulled from the environment above).
+#   emit_row <csv> <kernel> <mode> <compiler> <ver> <flags> <threads> <device> <ms>
+emit_row() {
+   printf '%s,%s,%s,"%s","%s",%s,"%s",%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+      "$2" "$3" "$4" "$(_q "$5")" "$(_q "$6")" "$7" "$(_q "$8")" \
+      "$NXP" "$NYP" "$NZ" "$REPS" "$WARM" "${9:-NaN}" "$GHASH" "$HOSTN" "$TS" >> "$1"
+}

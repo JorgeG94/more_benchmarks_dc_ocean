@@ -45,17 +45,42 @@ else ifeq ($(notdir $(FC)),gfortran)
   MODFLAG       ?= -J
 else ifeq ($(notdir $(FC)),ifx)
   FFLAGS_BASE   ?= -O3
-  DC_HOST_FLAGS ?=
+  # DATA=none default: do concurrent across CPU cores (Intel maps DC under -qopenmp)
+  DC_HOST_FLAGS ?= -qopenmp
   MODFLAG       ?= -module
 else ifeq ($(notdir $(FC)),amdflang)
   FFLAGS_BASE   ?= -O3
-  DC_HOST_FLAGS ?=
+  DC_HOST_FLAGS ?= -fopenmp -fdo-concurrent-to-openmp=host
+  MODFLAG       ?= -module-dir
+else ifeq ($(notdir $(FC)),flang)
+  FFLAGS_BASE   ?= -O3
+  DC_HOST_FLAGS ?= -fopenmp -fdo-concurrent-to-openmp=host
+  MODFLAG       ?= -module-dir
+else ifeq ($(notdir $(FC)),flang-new)
+  FFLAGS_BASE   ?= -O3
+  DC_HOST_FLAGS ?= -fopenmp -fdo-concurrent-to-openmp=host
   MODFLAG       ?= -module-dir
 else
   # unknown compiler: a plain optimised build is the safe default
   FFLAGS_BASE   ?= -O3
   DC_HOST_FLAGS ?=
   MODFLAG       ?= -J
+endif
+
+# ---- vendor GPU-offload flags for `do concurrent` (Intel / AMD) -------------
+# nvfortran offloads via the kernel Makefile's DATA=acc|omp path. For the OTHER
+# vendors, run_all.sh injects DC_GPU_FLAGS as a DC_MODE_FLAGS override on a
+# DATA=omp build -- the OpenMP-target data layer (DC_DATA_OMP) is vendor-portable,
+# only the compile flags differ. STRUCTURAL for Intel/AMD GPUs: validated where
+# such a device + toolchain exists (none on this dev node), mirroring the
+# BACKEND=hip seam below. Override the AMD arch as needed.
+AMD_GPU_ARCH ?= gfx90a
+ifeq ($(notdir $(FC)),ifx)
+  DC_GPU_FLAGS ?= -qopenmp -fopenmp-targets=spir64 -fopenmp-target-do-concurrent -DDC_DATA_OMP
+else ifeq ($(notdir $(FC)),amdflang)
+  DC_GPU_FLAGS ?= -fopenmp --offload-arch=$(AMD_GPU_ARCH) -fdo-concurrent-to-openmp=device -DDC_DATA_OMP
+else
+  DC_GPU_FLAGS ?=
 endif
 
 # ---- GPU-C comparison-kernel backend: cuda (default) | hip ------------------

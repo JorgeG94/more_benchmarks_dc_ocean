@@ -74,6 +74,12 @@ dc_omp
 dc_none
 cpp_cuda
 cpp_hip
+# serial do-loop baseline binary (make serialdo). Sources live in <kernel>/
+# serialdo/ and ARE tracked; only the binary is not.
+sdo
+*/sdo
+# per-kernel build logs written by build_and_run_*.sh / run_all.sh on failure
+*/.*_build.log
 # DC_DUMP / verify reference dumps (fh_ref.bin, kd_ref.bin, eta_ref.bin, ...).
 # The bathymetry input gabight_bathy_*.f64 is NOT a dump and stays tracked.
 *_ref.bin
