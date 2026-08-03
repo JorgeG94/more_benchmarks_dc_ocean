@@ -16,8 +16,22 @@
 # NOTE: keep these as bare `VAR ?= value` with NO trailing inline comment — the
 # spaces before a `#` land INSIDE the value and break `-gpu=$(ARCH),mem:separate`.
 FC       ?= nvfortran
-# nvfortran -gpu=<arch>: V100=cc70, A100=cc80, H200=cc90
-GPU_ARCH ?= cc70
+
+# ---- GPU ARCHITECTURE: DETECTED, NOT ASSUMED -------------------------------
+# This used to be a hardcoded `cc70`, which was a foot-gun the moment these
+# benchmarks left the V100 box: on any other card the entire sweep compiles for
+# Volta and runs through JIT/compat, and every DC-vs-CUDA ratio in the resulting
+# table is measuring the wrong target. Detect from the driver instead.
+#
+#   nvidia-smi --query-gpu=compute_cap  ->  "9.0"  ->  cc90 / sm_90
+#
+# Assigned with `=` (lazy) on purpose: it is only expanded if nothing overrides
+# it, so `make ARCH=cc90 NVARCH=sm_90` and tools/ks_sweep.sh (which detects once
+# and passes both) never pay for an nvidia-smi call per make invocation.
+GPU_CC    = $(shell command -v nvidia-smi >/dev/null 2>&1 && \
+              nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null \
+              | head -1 | tr -d ' .')
+GPU_ARCH  = $(if $(strip $(GPU_CC)),cc$(strip $(GPU_CC)),cc70)
 # the benchmarks spell it ARCH; keep the two in sync
 ARCH     ?= $(GPU_ARCH)
 # -DMODEL_NZ_STACK_MAX; production build uses 128
@@ -74,10 +88,20 @@ endif
 # only the compile flags differ. STRUCTURAL for Intel/AMD GPUs: validated where
 # such a device + toolchain exists (none on this dev node), mirroring the
 # BACKEND=hip seam below. Override the AMD arch as needed.
-AMD_GPU_ARCH ?= gfx90a
+# AMD arch: DETECTED, not assumed -- same foot-gun as the NVIDIA one above.
+# gfx90a is MI210/MI250; an MI300 is gfx942 and would silently get the wrong
+# target. Lazy `=` so an override (or a non-AMD box) never pays for rocminfo.
+AMD_GPU_CC   = $(shell command -v rocminfo >/dev/null 2>&1 && \
+                 rocminfo 2>/dev/null | grep -oE 'gfx[0-9a-f]+' | head -1)
+AMD_GPU_ARCH = $(if $(strip $(AMD_GPU_CC)),$(strip $(AMD_GPU_CC)),gfx90a)
+
+# LLVM flang and AMD's amdflang are the same driver for this purpose -- both
+# take `-fdo-concurrent-to-openmp=device`. Listing only `amdflang` meant a site
+# using the plain `flang` module got NO GPU lane at all and the AMD column came
+# back empty for the wrong reason.
 ifeq ($(notdir $(FC)),ifx)
   DC_GPU_FLAGS ?= -qopenmp -fopenmp-targets=spir64 -fopenmp-target-do-concurrent -DDC_DATA_OMP
-else ifeq ($(notdir $(FC)),amdflang)
+else ifneq ($(filter $(notdir $(FC)),amdflang flang flang-new),)
   DC_GPU_FLAGS ?= -fopenmp --offload-arch=$(AMD_GPU_ARCH) -fdo-concurrent-to-openmp=device -DDC_DATA_OMP
 else
   DC_GPU_FLAGS ?=
@@ -88,8 +112,10 @@ BACKEND  ?= cuda
 
 ifeq ($(BACKEND),cuda)
   GPUCC        ?= nvcc
-  # nvcc -arch: V100=sm_70, A100=sm_80, H200=sm_90
-  NVARCH       ?= sm_70
+  # nvcc -arch, detected the same way as GPU_ARCH above (V100=sm_70, A100=sm_80,
+  # H100/GH200=sm_90, B200=sm_100). Falls back to sm_70 only if no driver is
+  # queryable -- which on a GPU box means something is wrong, not that it is a V100.
+  NVARCH       ?= $(if $(strip $(GPU_CC)),sm_$(strip $(GPU_CC)),sm_70)
   GPU_ARCHFLAG ?= -arch=$(NVARCH)
 
 else ifeq ($(BACKEND),hip)

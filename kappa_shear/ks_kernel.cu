@@ -42,6 +42,34 @@
 #define NZL  MODEL_NZ_STACK_MAX
 #define NZLI (MODEL_NZ_STACK_MAX + 1)
 
+// ---------------------------------------------------------------------------
+// ALGORITHMIC-COMPLEXITY PARITY WITH THE FORTRAN  (-DKS_FULL_COPY)
+// ---------------------------------------------------------------------------
+// ks_solve_column has three WHOLE-ARRAY assignments -- `kappa_out = kappa` and
+// `kq_tmp = k_q` twice. In Fortran those copy the DECLARED extent (NZLI
+// elements = NZ_STACK_MAX+1), not 1..nz+1, because that is what a whole-array
+// assignment means; ks.F90:949 documents it as the ONLY reason wall time
+// depends on NZ_STACK_MAX at all. This port originally bounded them to
+// 1..nz+1, which is numerically identical (elements above nz+1 are never read)
+// but is NOT the same algorithmic complexity: O(NZ_STACK_MAX) became O(nz).
+//
+// Timing a bounded-copy CUDA kernel against a declared-extent `do concurrent`
+// kernel is therefore not a 1:1 comparison -- part of any measured gap is a
+// copy one side simply does not perform. So the copy bound is now a build
+// knob, and the two sides are compared in MATCHED pairs:
+//
+//   baseline  (true 1:1 with production Fortran):
+//       make cpp FULLCOPY=1      vs   make dc BCOPY=0
+//   optimised (both sides bound the copy):
+//       make cpp FULLCOPY=0      vs   make dc BCOPY=1
+//
+// Mixing the pairs measures the copy, not the codegen.
+#ifdef KS_FULL_COPY
+#define KS_COPY_TOP NZLI
+#else
+#define KS_COPY_TOP (nz + 1)
+#endif
+
 #ifndef KS_BLOCK
 #define KS_BLOCK 128
 #endif
@@ -795,14 +823,14 @@ __device__ void ks_solve_column(int nz, const KsPar &p, double f2_val,
       }
       tke[nz + 1] = tke_min;
 
-      for (int kk = 1; kk <= nz + 1; ++kk) kappa_out[kk] = kappa[kk];
+      for (int kk = 1; kk <= KS_COPY_TOP; ++kk) kappa_out[kk] = kappa[kk];
 
       int nit_here = 0;
       if (ks_src > ke_src) {
          for (int kk = 1; kk <= nz + 1; ++kk) kappa_out[kk] = 0.0;
          for (int kk = 2; kk <= nz; ++kk) ild2[kk] = 0.0;
       } else {
-         for (int kk = 1; kk <= nz + 1; ++kk) kq_tmp[kk] = k_q[kk];
+         for (int kk = 1; kk <= KS_COPY_TOP; ++kk) kq_tmp[kk] = k_q[kk];
          ks_find_kappa_tke(nz, tke_min, f2_val, p.ri_crit, p.shearmix_rate,
                            p.fri_curvature, c_n2, c_s2, ilambda2, p.kappa_0,
                            p.kappa_trunc, p.tke_bg, p.tol_err, p.max_inner_it,
@@ -865,7 +893,7 @@ __device__ void ks_solve_column(int nz, const KsPar &p, double f2_val,
          ks_projected_state(nz, dt_now, ks_ps, ke_ps, p.vel_underflow, dbuoy_t,
                             dbuoy_s, h_sd, idz_int_s, u_c, v_c, t_c, s_c,
                             kappa_out, u_ps, v_ps, t_ps, s_ps, c1_ps, n2p, s2p);
-         for (int kk = 1; kk <= nz + 1; ++kk) kq_tmp[kk] = k_q[kk];
+         for (int kk = 1; kk <= KS_COPY_TOP; ++kk) kq_tmp[kk] = k_q[kk];
          ks_find_kappa_tke(nz, tke_min, f2_val, p.ri_crit, p.shearmix_rate,
                            p.fri_curvature, c_n2, c_s2, ilambda2, p.kappa_0,
                            p.kappa_trunc, p.tke_bg, p.tol_err, p.max_inner_it,
@@ -1031,6 +1059,16 @@ extern "C" void ks_cuda_launch(const double *h_layer, const double *u_face,
       if (e != cudaSuccess)
          printf("  *** CUDA error (faithful): %s\n", cudaGetErrorString(e));
    }
+}
+
+// Barrier only. Lets a Fortran driver time N ASYNCHRONOUS launches followed by
+// one synchronise -- the same timing window the `do concurrent` side gets from
+// `!$acc wait`. The alternatives both bias the measurement: a sync per rep taxes
+// small grids, and an extra forced-sync launch inflates the rep count.
+extern "C" void ks_cuda_sync(void) {
+   cudaError_t e = cudaDeviceSynchronize();
+   if (e != cudaSuccess)
+      printf("  *** CUDA error (sync): %s\n", cudaGetErrorString(e));
 }
 
 // Reports the compiled frame size / register count straight from the driver --

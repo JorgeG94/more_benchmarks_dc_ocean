@@ -124,3 +124,17 @@ ideal_benchmark/*.f64
 
 # paper-run CSV outputs (build_and_run_*.sh); commit specific finals by hand if wanted
 paper_data/
+
+# ---- kappa_shear sweep build products --------------------------------------
+# tools/ks_sweep.sh gives every compile-time configuration its own binary and
+# build dir (NZSTACK / VARIANT / VLEN / BCOPY / CNT / TRIPCOUNT / OPT_NZMAX), so
+# the exact-name entries above cannot cover them.
+*/dc_acc-*
+*/dc_omp-*
+*/dc_none-*
+*/sdo-*
+*/cmp_acc*
+kappa_shear/*.bin
+kappa_shear/*.nsys-rep
+kappa_shear/*.sqlite
+kappa_shear/.ks_sweep_*.log

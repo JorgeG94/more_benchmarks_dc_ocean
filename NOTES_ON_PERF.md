@@ -107,6 +107,253 @@ divergence-bound (→ algorithmic).
   spills far more than nvcc's `__launch_bounds__` (EPBL: 568 B → 10.95 ms vs
   160 B → 4.87 ms). Config-dependent — it *helped* kappa_shear. Not universal.
 
+### amdflang: DC→OpenMP device offload can't map derived types that contain derived types
+
+**Status: hard blocker for the AMD GPU column, not a tuning issue.** Observed
+2026-07-29 on MI250X/`gfx90a`. Affects `continuity_layered`, `kappa_shear`,
+`epbl`, `ale_remap` — i.e. the AMD GPU column is empty, not partial.
+
+**One root cause, two manifestations.** `-fdo-concurrent-to-openmp=device`
+cannot build an OpenMP `map` clause for a `do concurrent` live-in whose type has
+a derived-type component. Older flang says so; newer flang crashes.
+
+*flang 22.0.0git (AMD AFAR drop #7.0) — clean NYI diagnostic:*
+
+```
+error: loc("continuity_layered.F90":111:44): DoConcurrentConversion.cpp:603:
+       not yet implemented: Nested record types are not supported yet.
+LLVM ERROR: aborting
+```
+
+*flang 23.0.0git (ROCm 7.13.0) — hard compiler crash:*
+
+```
+terminate called after throwing an instance of 'std::bad_function_call'
+#12 DoConcurrentConversion::genMapInfoOpForLiveIn(fir::FirOpBuilder&, mlir::Value)
+#13 DoConcurrentConversion::matchAndRewrite(fir::DoConcurrentOp, ...)
+flang-23: error: unable to execute command: Aborted (core dumped)
+```
+
+The frame that matters is `genMapInfoOpForLiveIn` — the pass is generating the
+map-info op for a **live-in** of the loop and cannot do it for that type.
+
+**The trigger is the live-in's TYPE, not the reference syntax.** This is the
+non-obvious part and it wrong-foots the obvious diagnosis:
+
+- The pass maps the *whole container* it captures, regardless of which fields
+  the body touches. So `kappa_shear` and `ale_remap` fail with **zero** `%a%b`
+  references anywhere in the file — grepping for nested accesses finds nothing
+  and tells you nothing.
+- The reported location is the **declaration**. `111:44` is the `:: this` in
+  `type(continuity_t), intent(inout) :: this`. Don't hunt that line for a
+  malformed loop; look at the *type definition* instead.
+
+Two nesting shapes are in play, and they are not equally hard:
+
+| shape | example | kernels |
+|---|---|---|
+| scalar derived component | `type(scratch_3d_buffer_t) :: h_face_left_x` (`continuity_layered.F90:86-91`) | continuity_layered, epbl, kappa_shear |
+| allocatable **array** of derived type | `type(tracer_slot_t), allocatable :: tracers(:)` (`ale_remap/remap_state.F90:57`) | ale_remap |
+
+`ale_remap` is the harder case: `ms%tracers(t)%hTr(i,j,k)` is an array-of-derived-type
+pointer chase, which is exactly the production layout the kernel was extracted
+to measure.
+
+**`=host` is unaffected** — only the device pass has the limitation, so
+`make dc DATA=none FC=amdflang` builds and runs. The AMD *CPU* lanes of the
+matrix are fine.
+
+This is a compiler limitation, not a portability finding about `do concurrent`:
+the construct is standard F2018, and nvfortran offloads it, gfortran compiles
+it, and amdflang's own host pass handles it.
+
+**Fix path — do NOT flatten the types.** The nesting IS the shipped data
+layout; flattening would benchmark a kernel that is not the one that ships,
+which defeats the extraction. Two candidate workarounds keep the layout and
+change only how the loop body *names* the arrays, so the live-in becomes a
+plain array instead of a record:
+
+- **`associate`-hoist** the component outside the loop, body uses the
+  associate-name. Zero structural change.
+- **Explicit-shape array dummies** — put the loop in a subroutine taking the
+  arrays as dummies. `ale_remap` already uses this idiom for
+  `ocean_remap_tracer_pair`.
+
+`tools/bugs/` holds the reproducer + a driver that decides between them:
+
+```bash
+cd tools/bugs && ./probe_amdflang_dc.sh          # device pass, gfx90a
+```
+
+It compiles 5 semantically-identical variants — the two failing shapes, both
+candidate workarounds, and a no-nesting control — and prints a PASS/FAIL table.
+If V=3 or V=4 passes, that idiom is the fix to apply to the four kernels
+(gated, as always, on the bit-identity check plus a perf-neutrality re-run on
+NVIDIA, since the change touches measured source). All 5 variants are verified
+equivalent under gfortran, so a PASS also proves correctness.
+
+**For the upstream report** (https://github.com/llvm/llvm-project/issues) —
+two standalone MREs, one per crash signature, ~30 lines each, no preprocessor,
+each with the compile line / expected / actual in its header:
+
+| file | triggers |
+|---|---|
+| `tools/bugs/mre_dc_device_nested_scalar_record.f90` | flang 22 `not yet implemented: Nested record types` |
+| `tools/bugs/mre_dc_device_alloc_array_of_record.f90` | flang 23 crash, `std::bad_function_call` in `genMapInfoOpForLiveIn` |
+
+Both verified to build and print `36.000000000000000` under
+`gfortran -std=f2018 -Wall`. The second is the stronger report (a crash, not a
+missing feature) and its header documents the load-bearing detail: the
+derived-type component triggers the failure *even when the loop body never
+dereferences it*, so the type must not be "simplified" away when triaging.
+
+## kappa_shear: the depth sweep, and a correction to the DC-vs-CUDA ratio
+
+`tools/ks_sweep.sh` (+ `tools/ks_report.py`) sweeps this kernel over depth,
+width, arrangement and the two compile-time policies below. Three results.
+
+### 1. The published ratio was not a 1:1 comparison
+
+`ks_solve_column` has three whole-array assignments (`kappa_out = kappa`,
+`kq_tmp = k_q` x2). Fortran copies the DECLARED extent — O(NZ_STACK_MAX) — and
+`ks.F90:949` notes this is the ONLY reason wall time depends on NZ_STACK_MAX at
+all. **Both CUDA kernels bounded that copy to `1..nz+1`, O(nz)**
+(`ks_kernel.cu:798`). So part of every published gap was a copy one side simply
+did not perform. `opt_kernel.cu`'s header says this was "measured separately by
+the `dcfix` variant (ks_fix.F90)" — that file no longer exists.
+
+`-DKS_FULL_COPY` now lets the faithful CUDA kernel reproduce the Fortran copy,
+and the two sides are always built as a MATCHED pair. V100, 473x297x30:
+
+| pairing | build | dc / cuda_faithful |
+|---|---|---|
+| mismatched (as previously measured) | `BCOPY=0`, `FULLCOPY=0` | 1.140x |
+| matched `prod` (both O(NZSTACK)) | `BCOPY=0`, `FULLCOPY=1` | **1.106x** |
+| matched `opt` (both O(nz)) | `BCOPY=1`, `FULLCOPY=0` | **1.112x** |
+
+The asymmetry inflated CUDA's advantage by ~3 points — about a quarter of the
+gap. `cuda_opt` always bounds the copy and so only ever belongs to `opt`.
+
+### 2. The CUDA advantage grows with nz, and it is not the obvious causes
+
+Matched pairs, `fit` stack policy, 473x297, min-of-3 (median-min spread <=0.13%):
+
+| nz | it/col | dc ns/col | cuda ns/col | dc/cuda |
+|---|---|---|---|---|
+| 10 | 2.07 | 26.9 | 25.9 | 1.038x |
+| 25 | 19.14 | 199.8 | 180.7 | 1.105x |
+| 30 | 19.75 | 267.8 | 237.2 | 1.129x |
+| 50 | 20.23 | 574.9 | 496.7 | 1.157x |
+| 75 | 20.23 | 958.6 | 829.2 | 1.156x |
+| 100 | 20.23 | 1364.4 | 1148.7 | 1.188x |
+
+Ruled out by the instrumentation, not by argument:
+- **not more iterations** — Picard iterations/column SATURATE at 20.23 from
+  nz=50 on, while the ratio keeps climbing;
+- **not the frame** — `fit` (NZSTACK=nz+1) and `prod` (128) converge at depth;
+  NZ_STACK_MAX only bites at the shallow end, where a fixed 129-double frame is
+  amortised over little work;
+- **not the copy** — every ratio above is a matched pair. (Under `fit` the
+  declared-extent copy IS the bounded copy, which is why `cuda_faithful` and
+  `cuda_opt` agree to 4 digits there — a free consistency check.)
+
+What is left is the k-sequential recursion dominating the fixed costs as nz
+grows. **Jorge measured ~1.67x on a GH200 at nz=100** — far larger than V100's
+1.19x, so the gap is strongly architecture-dependent.
+
+### 3. Register pressure — the likely mechanism, and how to test it
+
+`cuobjdump -res-usage` on the column kernel (now captured automatically into
+every GPU row's `regs` / `local_b`):
+
+| impl | registers | frame B/thread |
+|---|---|---|
+| `do concurrent` (nvfortran 26.5) | **254** — the cap | 66,600 |
+| `cuda_faithful` (nvcc 12.9) | 80 | 66,528 |
+
+nvfortran pins this kernel at 254 registers in EVERY build: NZSTACK 11 -> 128
+scales the frame 6.7 KB -> 66.6 KB and the register count never moves. Same
+arithmetic, ~3x the register file. On a V100 it costs little, because
+`kappa_shear/OPTIMIZATION.md` established the kernel is latency/divergence-bound
+at ~6% achieved occupancy — registers are not the binding constraint. On an
+architecture that hides that latency well GIVEN warps to schedule, it should
+cost much more. That is a falsifiable prediction: run the sweep on the GH200 and
+read the `regs` column.
+
+**`-gpu=tripcount:host` is NOT the cause on V100.** The `tripcount` experiment
+A/Bs it; on kappa_shear the effect is <=0.3% at every depth (OFF/ON =
+0.9997-1.0033 over nz=10..100), so this file's ~2x warning applies to a
+different kernel or configuration. Still run it first on any new GPU or compiler
+version: a 2x-wrong DC side is indistinguishable from a large
+architecture-dependent CUDA win.
+
+**GPU arch is now DETECTED, not assumed.** `config.mk` hardcoded `cc70`/`sm_70`,
+so any run on another card silently compiled for Volta and executed via JIT —
+which invalidates exactly the codegen ratio being measured. It now comes from
+`nvidia-smi --query-gpu=compute_cap`, is printed in the sweep banner, passed to
+every `make`, and recorded per row.
+
+### 4. CPU: thread scaling, and the arrangement question
+
+**Serial `do concurrent` costs NOTHING versus plain nested `do` loops** — on
+four independent compilers, which is the cleanest form of the portability claim.
+`dc_serial / serial_do`, 64x64 = 4900 columns, `fit` stack:
+
+| nz | flang 22.1.5 | gfortran 16.1 | ifx 2026.0 | nvfortran 26.5 |
+|---|---|---|---|---|
+| 10 | **1.170** | 1.010 | 1.005 | 1.000 |
+| 25 | 1.037 | 1.003 | 1.001 | 0.999 |
+| 30 | 1.018 | 1.011 | 1.001 | 0.997 |
+| 50 | 1.005 | 0.986 | 0.996 | 1.001 |
+| 75 | 1.008 | 0.986 | 0.996 | 1.001 |
+| 100 | 1.004 | 0.984 | 0.997 | 1.000 |
+
+Three of the four are flat within noise at every depth. **flang is the one
+exception and only at the shallow end** — 17% at nz=10, 3.7% at nz=25, gone by
+nz=50. At nz=10 a column runs just 2.37 Picard iterations, so a fixed per-loop
+cost in flang's `do concurrent` lowering is visible; once there is real work per
+column it disappears. Quote the DC-is-free claim with that caveat, not without.
+
+**Absolute standing, same source** (`serial_do` ns/col) — flang is the fastest
+serial compiler here and nvfortran the slowest by ~11%:
+
+| nz | flang | gfortran 16.1 | ifx | nvfortran |
+|---|---|---|---|---|
+| 30 | **14,489** | 14,599 | 14,812 | 15,682 |
+| 100 | **70,668** | 73,434 | 72,906 | 79,384 |
+
+**Thread scaling** (`dc_multicore`, nz=30, 20 physical cores + SMT). Three
+different mechanisms for the same source line — nvfortran `-stdpar=multicore`
+(driven by `ACC_NUM_CORES`), ifx `-qopenmp` and flang
+`-fdo-concurrent-to-openmp=host` (both `OMP_NUM_THREADS`):
+
+| threads | 2 | 4 | 8 | 16 | 32 | 40 | ms @40 |
+|---|---|---|---|---|---|---|---|
+| ifx 2026.0 | 1.84x | 3.45x | 6.57x | 12.63x | 19.49x | **24.24x** | **3.010** |
+| nvfortran 26.5 | 1.84x | 3.37x | 6.43x | 11.35x | 14.46x | 21.22x | 3.680 |
+| flang 22.1.5 | 1.85x | 3.39x | 6.45x | 11.32x | 13.95x | 20.63x | 3.484 |
+
+So flang wins serial, ifx wins threaded. gfortran has no multicore lane:
+`config.mk` gives it no host-parallel `do concurrent` flag.
+
+⚠ flang's `-fdo-concurrent-to-openmp=host` warns "Mapping `do concurrent` to
+OpenMP is still experimental" but works, and handles this kernel's nested
+derived types fine. Only the `=device` pass fails on them (see the amdflang
+section above) — so "flang cannot do this kernel" is too strong; it is "flang
+cannot OFFLOAD this kernel".
+
+**Column blocking (`VARIANT=block`, `ks_block.F90`) never beats the shipped
+per-column arrangement on AVX2**, but the vectorisation works. Best-vs-faithful,
+Broadwell, same-run baseline: serial lanes reach 0.98x at nz=75 / VLEN=4,
+multicore only 0.65x. Three separable facts: the transformation alone costs
+~1.7x (VLEN=1 = 0.56-0.66, from masked full-range loops replacing per-column
+early exits); vectorisation peaks at VLEN=4, exactly AVX2's four doubles, and
+regresses at 8/16; and depth helps (0.78 -> 0.98 from nz=30 to 75) while threads
+hurt (blocked frame is VL times larger, so 40 threads thrash cache). Since
+VLEN=8 already regresses here, the binding constraint is masking overhead and
+footprint rather than vector width — which predicts AVX-512 will help the
+single-threaded lane and not the fully-threaded one.
+
 ## Methodology / traps
 
 - **Correctness = bit-identity**, bar `max rel diff < 1e-12` (FMA-contraction

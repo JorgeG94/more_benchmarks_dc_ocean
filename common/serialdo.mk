@@ -19,9 +19,14 @@
 # Binary is `sdo` (NOT `serialdo`) so `clean` never collides with the serialdo/
 # SOURCE directory.
 
+# SD_TAG: optional per-configuration suffix so a kernel that exposes
+# compile-time sweep axes (kappa_shear: NZSTACK/VARIANT/VLEN/...) gets one build
+# dir + binary per configuration instead of clobbering the previous one. EMPTY
+# by default -> the historical `sdo` / `build/serialdo` names are unchanged.
+SD_TAG    ?=
 SD_BASES  := $(notdir $(DC_SRCS))
-SDBLD     := build/serialdo
-SDBIN     := sdo
+SDBLD     := build/serialdo$(SD_TAG)
+SDBIN     := sdo$(SD_TAG)
 SDOBJS    := $(patsubst %.F90,$(SDBLD)/%.o,$(SD_BASES))
 SD_FFLAGS := $(BASE_FFLAGS)          # base flags only: serial, no device layer
 
@@ -53,9 +58,10 @@ run-serialdo: serialdo
 # bit-identity gate (runs where the DC source compiles -- e.g. nvfortran): the
 # do-concurrent build dumps a reference field, the serial-do build cross-checks
 # it (max rel diff < 1e-12). Proves the loop rewrite is numerically inert.
+SD_REF_BIN ?= dc_acc$(SD_TAG)
 verify-serialdo:
 	@$(MAKE) --no-print-directory dc DATA=acc
-	@DC_DUMP=serialdo_ref.bin ./dc_acc $(SD_ARGS)
+	@DC_DUMP=serialdo_ref.bin ./$(SD_REF_BIN) $(SD_ARGS)
 	@$(MAKE) --no-print-directory serialdo
 	@DC_REF=serialdo_ref.bin ./$(SDBIN) $(SD_ARGS)
 
