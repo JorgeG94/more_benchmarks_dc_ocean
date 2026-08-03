@@ -112,6 +112,12 @@ endif
 BACKEND  ?= cuda
 
 ifeq ($(BACKEND),cuda)
+  # ⚠ `nvcc` on PATH is often NVHPC's BUNDLED CUDA, which may be newer than your
+  # GPU. On this V100 box nvhpc/26.5 puts CUDA 13.2 first, and 13.x dropped
+  # Volta: `nvcc fatal : Unsupported gpu architecture 'sm_70'`. Keep the
+  # portable default here and override per machine instead of hardcoding a path
+  # that exists on exactly one host:
+  #     export GPUCC=/usr/local/cuda-12.9/bin/nvcc      # or make GPUCC=...
   GPUCC        ?= nvcc
   # nvcc -arch, detected the same way as GPU_ARCH above (V100=sm_70, A100=sm_80,
   # H100/GH200=sm_90, B200=sm_100). Falls back to sm_70 only if no driver is

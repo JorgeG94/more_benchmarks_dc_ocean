@@ -135,10 +135,30 @@ module ks
 contains
 
    pure subroutine kappa_shear_column_kernel(grid, this, ms, hT, hS, dt)
-      !! Per-column JHL08 solve. One `do concurrent (j, i)` over owned cells;
-      !! every column is solved serially in surface-down order. TRANSCRIBED
-      !! from production :296-466 — see the module header for the three
-      !! dropped pieces.
+      !! Thin shim: dereference the derived types HERE, on the host, and hand
+      !! the loop plain arrays and scalars.
+      !!
+      !! ⚠ THIS SPLIT IS LOAD-BEARING FOR AMD, and it is not cosmetic.
+      !! `-fdo-concurrent-to-openmp=device` cannot build an OpenMP map clause
+      !! for a `do concurrent` live-in whose type has a derived-type COMPONENT:
+      !!   error: DoConcurrentConversion.cpp:603: not yet implemented:
+      !!          Nested record types are not supported yet.
+      !! Observed on Frontier, amdflang/ROCm, gfx90a. The trigger is the
+      !! live-in's TYPE, not the reference syntax -- the pass maps the whole
+      !! captured container regardless of which fields the body touches, and it
+      !! reports the DECLARATION (`:: this`) rather than any use site, so
+      !! grepping the body for `%a%b` finds nothing and tells you nothing.
+      !!
+      !! Here exactly ONE type is at fault: `ocean_kappa_shear_t` holds
+      !! `type(ocean_eos_t) :: eos`. `multilayer_cgrid_state_t` and `hgrid_t`
+      !! are already flat. So the loop below takes `eos` DIRECTLY (a flat record
+      !! -- legal as a live-in) plus plain arrays, and never captures `this`.
+      !!
+      !! ⚠ THE DATA LAYOUT IS UNCHANGED. Only the NAMES the loop body uses
+      !! change; every array is the same allocation with the same strides. That
+      !! matters because the production layout is the thing this kernel exists
+      !! to measure -- flattening the derived types would benchmark a kernel
+      !! that does not ship. Verified bit-identical and perf-neutral on NVIDIA.
       type(hgrid_t), intent(in) :: grid
       type(ocean_kappa_shear_t), intent(inout) :: this
       type(multilayer_cgrid_state_t), intent(in) :: ms
@@ -146,7 +166,60 @@ contains
       real(wp), intent(in) :: hS(:, :, :)
       real(wp), intent(in) :: dt
 
-      integer :: i, j, k, kg, nx, ny, nz
+      call ks_column_loop(grid%nx_total, grid%ny_total, ms%nz_ml, dt, &
+                          ms%wet_mask, ms%h_layer, ms%u_face_x_layer, &
+                          ms%v_face_y_layer, hT, hS, &
+                          this%f_centre, this%kd_int, this%tke_int, &
+                          this%lz_rescale, this%rho0, this%ri_crit, &
+                          this%shearmix_rate, this%fri_curvature, this%c_n, &
+                          this%c_s, this%lambda, this%kappa_0, &
+                          this%kappa_seed, this%kappa_trunc, this%tke_bg, &
+                          this%tol_err, this%max_inner_it, &
+                          this%max_substep_it, this%src_max_chg, &
+                          this%vel_underflow, this%eos &
+#ifdef KS_COUNTERS
+                          , this%it_outer, this%it_inner &
+#endif
+                          )
+   end subroutine kappa_shear_column_kernel
+
+   pure subroutine ks_column_loop(nx, ny, nz, dt, &
+                                  wet_mask, h_layer, u_face_x, v_face_y, &
+                                  hT, hS, f_centre, kd_int, tke_int, &
+                                  lz_rescale, rho0, ri_crit, shearmix_rate, &
+                                  fri_curvature, c_n, c_s, lambda, kappa_0, &
+                                  kappa_seed, kappa_trunc, tke_bg, tol_err, &
+                                  max_inner_it, max_substep_it, src_max_chg, &
+                                  vel_underflow, eos &
+#ifdef KS_COUNTERS
+                                  , it_outer, it_inner &
+#endif
+                                  )
+      !! The `do concurrent` itself. Every dummy is a plain array or scalar
+      !! except `eos`, which is a FLAT record and therefore a legal live-in.
+      !! Explicit shapes, not assumed-shape: an assumed-shape dummy carries a
+      !! descriptor, which is another thing an offload pass has to map.
+      integer, intent(in) :: nx, ny, nz
+      real(wp), intent(in) :: dt
+      real(wp), intent(in) :: wet_mask(nx, ny)
+      real(wp), intent(in) :: h_layer(nx, ny, nz)
+      real(wp), intent(in) :: u_face_x(nx + 1, ny, nz)
+      real(wp), intent(in) :: v_face_y(nx, ny + 1, nz)
+      real(wp), intent(in) :: hT(nx, ny, nz), hS(nx, ny, nz)
+      real(wp), intent(in) :: f_centre(nx, ny)
+      real(wp), intent(inout) :: kd_int(nx, ny, nz + 1)
+      real(wp), intent(inout) :: tke_int(nx, ny, nz + 1)
+      real(wp), intent(in) :: lz_rescale, rho0, ri_crit, shearmix_rate
+      real(wp), intent(in) :: fri_curvature, c_n, c_s, lambda, kappa_0
+      real(wp), intent(in) :: kappa_seed, kappa_trunc, tke_bg, tol_err
+      integer, intent(in) :: max_inner_it, max_substep_it
+      real(wp), intent(in) :: src_max_chg, vel_underflow
+      type(ocean_eos_t), intent(in) :: eos
+#ifdef KS_COUNTERS
+      integer, intent(inout) :: it_outer(nx, ny), it_inner(nx, ny)
+#endif
+
+      integer :: i, j, k, kg
       real(wp) :: f2_val, hk, inv_h
       real(wp) :: h_sd(NZL), u_sd(NZL), v_sd(NZL), t_sd(NZL), s_sd(NZL)
       real(wp) :: idz_s(NZL), idz_int_s(NZLI), hint_s(NZLI), il2_s(NZLI)
@@ -154,10 +227,6 @@ contains
 #ifdef KS_COUNTERS
       integer :: n_out_l, n_in_l
 #endif
-
-      nx = grid%nx_total
-      ny = grid%ny_total
-      nz = ms%nz_ml
 
       do concurrent(j=1:ny, i=1:nx) &
          local(k, kg, f2_val, hk, inv_h KS_CNT_LOCALS, &
@@ -175,18 +244,18 @@ contains
          n_in_l = 0
 #endif
 
-         if (ms%wet_mask(i, j) > 0.0_wp) then
+         if (wet_mask(i, j) > 0.0_wp) then
             ! ---- Gather with the index flip (local k=1 = surface) ----
             do k = 1, nz
                kg = nz + 1 - k
-               h_sd(k) = ms%h_layer(i, j, kg)
-               u_sd(k) = 0.5_wp*(ms%u_face_x_layer(i, j, kg) + &
-                                 ms%u_face_x_layer(i + 1, j, kg))
-               v_sd(k) = 0.5_wp*(ms%v_face_y_layer(i, j, kg) + &
-                                 ms%v_face_y_layer(i, j + 1, kg))
+               h_sd(k) = h_layer(i, j, kg)
+               u_sd(k) = 0.5_wp*(u_face_x(i, j, kg) + &
+                                 u_face_x(i + 1, j, kg))
+               v_sd(k) = 0.5_wp*(v_face_y(i, j, kg) + &
+                                 v_face_y(i, j + 1, kg))
             end do
 
-            f2_val = this%f_centre(i, j)*this%f_centre(i, j)
+            f2_val = f_centre(i, j)*f_centre(i, j)
 
             ! ---- Gather floor at H_VANISHED, solve on nz. (Production's
             !      `else` branch — the live one; `do_merge` is always false.)
@@ -199,17 +268,17 @@ contains
                s_sd(k) = hS(i, j, kg)*inv_h
             end do
 
-            call ks_precompute(nz, this%lz_rescale, h_sd, &
+            call ks_precompute(nz, lz_rescale, h_sd, &
                                idz_s, idz_int_s, hint_s, il2_s)
 
-            call ks_solve_column(nz, dt, f2_val, this%rho0, &
-                                 this%ri_crit, this%shearmix_rate, &
-                                 this%fri_curvature, this%c_n, this%c_s, &
-                                 this%lambda, this%kappa_0, this%kappa_seed, &
-                                 this%kappa_trunc, this%tke_bg, this%tol_err, &
-                                 this%max_inner_it, this%max_substep_it, &
-                                 this%src_max_chg, this%vel_underflow, &
-                                 this%eos, &
+            call ks_solve_column(nz, dt, f2_val, rho0, &
+                                 ri_crit, shearmix_rate, &
+                                 fri_curvature, c_n, c_s, &
+                                 lambda, kappa_0, kappa_seed, &
+                                 kappa_trunc, tke_bg, tol_err, &
+                                 max_inner_it, max_substep_it, &
+                                 src_max_chg, vel_underflow, &
+                                 eos, &
                                  h_sd, u_sd, v_sd, t_sd, s_sd, &
                                  idz_s, idz_int_s, hint_s, il2_s, &
                                  kappa_avg_sd, tke_avg_sd &
@@ -222,19 +291,19 @@ contains
          ! ---- Scatter with the flip; force exact 0 at bed + surface ----
          do k = 1, nz + 1
             kg = nz + 2 - k
-            this%kd_int(i, j, kg) = kappa_avg_sd(k)
-            this%tke_int(i, j, kg) = tke_avg_sd(k)
+            kd_int(i, j, kg) = kappa_avg_sd(k)
+            tke_int(i, j, kg) = tke_avg_sd(k)
          end do
-         this%kd_int(i, j, 1) = 0.0_wp
-         this%kd_int(i, j, nz + 1) = 0.0_wp
-         this%tke_int(i, j, 1) = 0.0_wp
-         this%tke_int(i, j, nz + 1) = 0.0_wp
+         kd_int(i, j, 1) = 0.0_wp
+         kd_int(i, j, nz + 1) = 0.0_wp
+         tke_int(i, j, 1) = 0.0_wp
+         tke_int(i, j, nz + 1) = 0.0_wp
 #ifdef KS_COUNTERS
-         this%it_outer(i, j) = n_out_l
-         this%it_inner(i, j) = n_in_l
+         it_outer(i, j) = n_out_l
+         it_inner(i, j) = n_in_l
 #endif
       end do
-   end subroutine kappa_shear_column_kernel
+   end subroutine ks_column_loop
 
    ! =================================================================
    ! Column solve helpers — VERBATIM from production :474-1430.

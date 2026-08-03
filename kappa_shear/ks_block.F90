@@ -36,6 +36,16 @@
 !! sweep still BUILDS those points so the cost is measured rather than asserted.
 !! Use the `fit` stack policy for GPU VLEN runs or they will not launch.
 !!
+!! ⚠ NOT YET AMD-OFFLOAD SAFE. ks.F90's kernel was split into a host-side shim
+!! plus `ks_column_loop` so the `do concurrent` never captures a derived type
+!! with a derived-type COMPONENT -- amdflang's `-fdo-concurrent-to-openmp=device`
+!! cannot map one (DoConcurrentConversion.cpp:603, "Nested record types"). THIS
+!! file still captures `this`, so VARIANT=block will hit that error under
+!! amdflang device offload. It has not been split because VL > 1 on a GPU is
+!! prohibitive anyway (see the frame arithmetic above) and the CPU lanes are
+!! unaffected -- but VLEN=1 on an AMD GPU would trip it. Apply the same shim if
+!! that configuration is ever needed.
+!!
 !! ============================================================================
 !! VERIFICATION STATUS + FIRST MEASURED RESULT
 !! ============================================================================
