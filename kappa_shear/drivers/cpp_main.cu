@@ -108,7 +108,7 @@ extern "C" void ks_cuda_attrs(int *nregs, int *local_bytes, int *shared_bytes,
 // From ks_bench.F90. DT_THERM is not a knob: dt sets how many adaptive
 // substeps the outer loop needs, so changing it changes the problem.
 static const int NXP_DEF = 473, NYP_DEF = 297, NZ_DEF = 30;
-static const int REPS_DEF = 20, WARM_DEF = 10, NGHOST = 3;
+static const int REPS_DEF = 200, WARM_DEF = 10, NGHOST = 3;
 static const double DT_THERM = 300.0;  // &time_nml dt_fixed, therm ratio 1
 static const int EOS_VARIANT_LINEAR = 1;
 
