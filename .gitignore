@@ -138,3 +138,4 @@ kappa_shear/*.bin
 kappa_shear/*.nsys-rep
 kappa_shear/*.sqlite
 kappa_shear/.ks_sweep_*.log
+kappa_shear/.ks_min_*.log
