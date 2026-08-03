@@ -56,7 +56,7 @@ module ocean_eos
    use constants, only: wp
    implicit none
    private
-   public :: ocean_eos_t, eos_specvol_derivs
+   public :: ocean_eos_t, eos_specvol_derivs, eos_specvol_derivs_s
    public :: EOS_VARIANT_LINEAR, EOS_VARIANT_WRIGHT_97
 
    integer, parameter :: EOS_VARIANT_LINEAR = 1
@@ -98,6 +98,54 @@ contains
    !! Verbatim from ocean_eos.F90 `eos_specvol_derivs`, minus the
    !! ROQUET_SPV branch (its point routine is 200 lines of coefficient table
    !! and production does not select it). LINEAR + WRIGHT retained.
+   !! Scalar-argument form of eos_specvol_derivs. Same arithmetic, but takes the
+   !! four EOS fields directly instead of the record.
+   !!
+   !! WHY IT EXISTS: amdflang's `-fdo-concurrent-to-openmp=device` cannot map a
+   !! `do concurrent` live-in whose type has a derived-type component. ks.F90's
+   !! loop was split so it captures no such type -- but it still had to pass
+   !! `ocean_eos_t` down to the column solve. That record is FLAT, so it ought to
+   !! be a legal live-in, and on NVIDIA it is. This routine removes the question
+   !! entirely: with it, the `do concurrent` captures NO derived type of any
+   !! shape, which is the only position that does not depend on how a particular
+   !! offload pass treats records.
+   pure subroutine eos_specvol_derivs_s(variant, rho0, alpha_T, beta_S, &
+                                        T, S, p, dsv_dt, dsv_ds)
+      !$acc routine seq
+#ifdef DC_DATA_OMP
+      !$omp declare target
+#endif
+      integer, intent(in) :: variant
+      real(wp), intent(in) :: rho0, alpha_T, beta_S
+      real(wp), intent(in) :: T, S, p
+      real(wp), intent(out) :: dsv_dt, dsv_ds
+
+      real(wp) :: T_sq, p_0, lambda, big_p, inv_p, inv_p2
+      real(wp) :: dp0_dt, dlam_dt, dp0_ds, dlam_ds
+
+      if (variant == EOS_VARIANT_WRIGHT_97) then
+         T_sq = T*T
+         p_0 = WRIGHT_B0 + WRIGHT_B1*T + WRIGHT_B2*T_sq + WRIGHT_B3*T_sq*T + &
+               WRIGHT_B4*S + WRIGHT_B5*S*T
+         lambda = WRIGHT_C0 + WRIGHT_C1*T + WRIGHT_C2*T_sq + WRIGHT_C3*T_sq*T + &
+                  WRIGHT_C4*S + WRIGHT_C5*S*T
+         dp0_dt = WRIGHT_B1 + 2.0_wp*WRIGHT_B2*T + 3.0_wp*WRIGHT_B3*T_sq + &
+                  WRIGHT_B5*S
+         dlam_dt = WRIGHT_C1 + 2.0_wp*WRIGHT_C2*T + 3.0_wp*WRIGHT_C3*T_sq + &
+                   WRIGHT_C5*S
+         dp0_ds = WRIGHT_B4 + WRIGHT_B5*T
+         dlam_ds = WRIGHT_C4 + WRIGHT_C5*T
+         big_p = p + p_0
+         inv_p = 1.0_wp/big_p
+         inv_p2 = inv_p*inv_p
+         dsv_dt = WRIGHT_A1 + dlam_dt*inv_p - lambda*dp0_dt*inv_p2
+         dsv_ds = WRIGHT_A2 + dlam_ds*inv_p - lambda*dp0_ds*inv_p2
+      else
+         dsv_dt = alpha_T/(rho0*rho0)
+         dsv_ds = -beta_S/(rho0*rho0)
+      end if
+   end subroutine eos_specvol_derivs_s
+
    pure subroutine eos_specvol_derivs(eos, T, S, p, dsv_dt, dsv_ds)
       !$acc routine seq
       type(ocean_eos_t), intent(in) :: eos

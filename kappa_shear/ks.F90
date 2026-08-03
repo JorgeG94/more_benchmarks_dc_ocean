@@ -59,7 +59,7 @@ module ks
    use constants, only: wp, GRAVITY, NZ_STACK_MAX, H_VANISHED
    use grid, only: hgrid_t
    use multilayer_cgrid_state, only: multilayer_cgrid_state_t
-   use ocean_eos, only: ocean_eos_t, eos_specvol_derivs
+   use ocean_eos, only: ocean_eos_t, eos_specvol_derivs_s
    implicit none
    private
 
@@ -176,7 +176,8 @@ contains
                           this%kappa_seed, this%kappa_trunc, this%tke_bg, &
                           this%tol_err, this%max_inner_it, &
                           this%max_substep_it, this%src_max_chg, &
-                          this%vel_underflow, this%eos &
+                          this%vel_underflow, this%eos%variant, &
+                          this%eos%rho0, this%eos%alpha_T, this%eos%beta_S &
 #ifdef KS_COUNTERS
                           , this%it_outer, this%it_inner &
 #endif
@@ -190,7 +191,8 @@ contains
                                   fri_curvature, c_n, c_s, lambda, kappa_0, &
                                   kappa_seed, kappa_trunc, tke_bg, tol_err, &
                                   max_inner_it, max_substep_it, src_max_chg, &
-                                  vel_underflow, eos &
+                                  vel_underflow, eos_variant, eos_rho0, &
+                                  eos_alpha_T, eos_beta_S &
 #ifdef KS_COUNTERS
                                   , it_outer, it_inner &
 #endif
@@ -214,7 +216,12 @@ contains
       real(wp), intent(in) :: kappa_seed, kappa_trunc, tke_bg, tol_err
       integer, intent(in) :: max_inner_it, max_substep_it
       real(wp), intent(in) :: src_max_chg, vel_underflow
-      type(ocean_eos_t), intent(in) :: eos
+      !! The EOS as four scalars, NOT as `type(ocean_eos_t)`. That record is
+      !! flat and ought to be a legal `do concurrent` live-in -- but this way the
+      !! loop captures no derived type of ANY shape, which does not depend on how
+      !! a given offload pass chooses to treat records.
+      integer, intent(in) :: eos_variant
+      real(wp), intent(in) :: eos_rho0, eos_alpha_T, eos_beta_S
 #ifdef KS_COUNTERS
       integer, intent(inout) :: it_outer(nx, ny), it_inner(nx, ny)
 #endif
@@ -278,7 +285,8 @@ contains
                                  kappa_trunc, tke_bg, tol_err, &
                                  max_inner_it, max_substep_it, &
                                  src_max_chg, vel_underflow, &
-                                 eos, &
+                                 eos_variant, eos_rho0, eos_alpha_T, &
+                                 eos_beta_S, &
                                  h_sd, u_sd, v_sd, t_sd, s_sd, &
                                  idz_s, idz_int_s, hint_s, il2_s, &
                                  kappa_avg_sd, tke_avg_sd &
@@ -893,7 +901,8 @@ contains
                                    c_n, c_s, lambda, kappa_0, kappa_seed_in, &
                                    kappa_trunc, tke_bg, tol_err, max_inner_it, &
                                    max_substep_it, src_max_chg, vel_underflow, &
-                                   eos, &
+                                   eos_variant, eos_rho0, eos_alpha_T, &
+                                   eos_beta_S, &
                                    h_sd, u_sd, v_sd, t_sd, s_sd, &
                                    idz_s, idz_int_s, hint_s, il2_s, &
                                    kappa_avg_sd, tke_avg_sd &
@@ -902,7 +911,8 @@ contains
 #endif
                                    )
       DC_ROUTINE_SEQ
-      type(ocean_eos_t), intent(in) :: eos
+      integer, intent(in) :: eos_variant
+      real(wp), intent(in) :: eos_rho0, eos_alpha_T, eos_beta_S
       integer, intent(in) :: nz, max_inner_it, max_substep_it
       real(wp), intent(in) :: dt, f2_val, rho0
       real(wp), intent(in) :: ri_crit, shearmix_rate, fri_curvature
@@ -1013,8 +1023,9 @@ contains
          p_int = p_int + dpres
          t_int = 0.5_wp*(t_c(kk - 1) + t_c(kk))
          s_int = 0.5_wp*(s_c(kk - 1) + s_c(kk))
-         call eos_specvol_derivs(eos, t_int, s_int, p_int, &
-                                 dsv_dt_k, dsv_ds_k)
+         call eos_specvol_derivs_s(eos_variant, eos_rho0, eos_alpha_T, &
+                                   eos_beta_S, t_int, s_int, p_int, &
+                                   dsv_dt_k, dsv_ds_k)
          dbuoy_t(kk) = GRAVITY*rho0*dsv_dt_k
          dbuoy_s(kk) = GRAVITY*rho0*dsv_ds_k
       end do
