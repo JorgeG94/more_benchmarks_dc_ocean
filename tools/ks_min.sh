@@ -93,6 +93,26 @@ run_bin() {   # $1 bin, $2 nz, $3 reps, $4 warm, $5 threads, $6 nzstack
         ./"$1" "$NXP" "$NYP" "$2" "$3" "$4" "$LAND_PCT" 2>&1 )
 }
 
+# Registers + per-thread frame for the `do concurrent` kernel, read out of the
+# built binary. THE cross-architecture diagnostic: the CUDA side reports this at
+# run time via cudaFuncGetAttributes, but the Fortran side has no equivalent, so
+# without this the most informative column is blank for exactly the half of the
+# comparison under investigation. Measured on V100/nvfortran 26.5: DC sits at the
+# 254-register cap in every build while nvcc uses 80. Local, cheap, no device query.
+CUOBJDUMP="$(command -v cuobjdump 2>/dev/null)"
+[ -n "$CUOBJDUMP" ] || CUOBJDUMP="$(dirname "$(command -v nvfortran 2>/dev/null)" 2>/dev/null)/cuobjdump"
+[ -x "$CUOBJDUMP" ] || CUOBJDUMP=""
+gpu_res_usage() {   # $1 = binary (relative to KDIR); prints "REG STACK"
+   [ -n "$CUOBJDUMP" ] && [ -f "$KDIR/$1" ] || { echo ""; return; }
+   "$CUOBJDUMP" -res-usage "$KDIR/$1" 2>/dev/null | awk '
+      /^ Function /{ f=$2; sub(/:$/,"",f) }
+      /REG:/{ r=0; st=0
+         if (match($0,/REG:[0-9]+/))   r  = substr($0,RSTART+4,RLENGTH-4)+0
+         if (match($0,/STACK:[0-9]+/)) st = substr($0,RSTART+6,RLENGTH-6)+0
+         if (f ~ /column_kernel_[0-9]+_gpu/) { br=r; bs=st } }
+      END{ if (br+0>0) print br, bs }'
+}
+
 declare -A R
 parse_line() { local t; R=(); for t in $1; do case "$t" in *=*) R[${t%%=*}]="${t#*=}";; esac; done; [ -n "${R[ms]:-}" ]; }
 median() { sort -g | awk '{v[NR]=$1} END{ if(NR==0){print ""; exit} print (NR%2)? v[(NR+1)/2] : (v[NR/2]+v[NR/2+1])/2 }'; }
@@ -162,6 +182,11 @@ measure() {   # $1 nz, $2 nzstack, $3 stack_policy, $4 threads
       if [ "${USING_CMP:-0}" = 1 ]; then set_cmp_args "$nzs" 0; else set_make_args "$nzs" 0; fi
    fi
 
+   # DC-kernel registers/frame, only meaningful for a GPU build
+   local DC_REGS="" DC_STACK=""
+   case "$MODE" in dc_gpu) read -r DC_REGS DC_STACK <<<"$(gpu_res_usage "$bin")";; esac
+   [ "${USING_CMP:-0}" = 1 ] && read -r DC_REGS DC_STACK <<<"$(gpu_res_usage "$bin")"
+
    local mn md nspc ito iti
    for imp in $order; do
       mn=$(printf '%s\n' ${MSL[$imp]} | sort -g | head -1)
@@ -170,6 +195,8 @@ measure() {   # $1 nz, $2 nzstack, $3 stack_policy, $4 threads
       nspc=$(awk -v m="$mn" -v n="${R[ncols]:-1}" 'BEGIN{printf "%.6f", m*1e6/n}')
       ito="${R[it_outer]:-}"; iti="${R[it_inner]:-}"
       [ "$imp" = dc ] && [ -n "$dc_iti" ] && { ito="$dc_ito"; iti="$dc_iti"; }
+      # the Fortran driver cannot report its own kernel's registers; cuobjdump can
+      [ "$imp" = dc ] && [ -n "$DC_REGS" ] && { R[regs]="$DC_REGS"; R[local_b]="$DC_STACK"; }
       printf '    %s  %-14s %12s ms  %11s ns/col  it=%s\n' "$label" "$imp" "$mn" "$nspc" "${iti:-?}"
       emit "$imp" OK "$mn" "$md" "$nspc" "$ito" "$iti" "$nzs" "$spol" "$thr"
    done
