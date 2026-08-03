@@ -45,6 +45,11 @@ STACK    ?= $(NZSTACK)
 # is nvfortran-only; DATA=none is the portable CPU build and works with any
 # compiler that supports F2018 `do concurrent ... local(...)` -- nvfortran,
 # gfortran >= 12, or ifx >= 2023. Keyed on FC; override on the CLI too.
+# Every name LLVM flang ships as: plain `flang`, the transitional `flang-new`,
+# and AMD's `amdflang` / `amdflang-new`. Kept in ONE place so the host-flag,
+# GPU-flag and MODFLAG rules cannot drift apart.
+FLANG_FAMILY := flang flang-new amdflang amdflang-new
+
 # MODFLAG: how the compiler is told where to WRITE .mod files. Spelled as a
 # space-separated flag so the kernel Makefiles use `$(MODFLAG) <dir>` uniformly:
 #   nvfortran / ifx -> -module <dir>;  gfortran -> -J <dir>;  flang -> -module-dir.
@@ -62,15 +67,11 @@ else ifeq ($(notdir $(FC)),ifx)
   # DATA=none default: do concurrent across CPU cores (Intel maps DC under -qopenmp)
   DC_HOST_FLAGS ?= -qopenmp
   MODFLAG       ?= -module
-else ifeq ($(notdir $(FC)),amdflang)
-  FFLAGS_BASE   ?= -O3
-  DC_HOST_FLAGS ?= -fopenmp -fdo-concurrent-to-openmp=host
-  MODFLAG       ?= -module-dir
-else ifeq ($(notdir $(FC)),flang)
-  FFLAGS_BASE   ?= -O3
-  DC_HOST_FLAGS ?= -fopenmp -fdo-concurrent-to-openmp=host
-  MODFLAG       ?= -module-dir
-else ifeq ($(notdir $(FC)),flang-new)
+else ifneq ($(filter $(notdir $(FC)),$(FLANG_FAMILY)),)
+  # LLVM flang under every name it ships as. Listing these individually invited
+  # a silent fall-through: `amdflang-new` (newer ROCm) hit the unknown-compiler
+  # default and got MODFLAG=-J, no host flag and no GPU flag -- i.e. a
+  # serial-only lane and an empty AMD column, for the wrong reason.
   FFLAGS_BASE   ?= -O3
   DC_HOST_FLAGS ?= -fopenmp -fdo-concurrent-to-openmp=host
   MODFLAG       ?= -module-dir
@@ -101,7 +102,7 @@ AMD_GPU_ARCH = $(if $(strip $(AMD_GPU_CC)),$(strip $(AMD_GPU_CC)),gfx90a)
 # back empty for the wrong reason.
 ifeq ($(notdir $(FC)),ifx)
   DC_GPU_FLAGS ?= -qopenmp -fopenmp-targets=spir64 -fopenmp-target-do-concurrent -DDC_DATA_OMP
-else ifneq ($(filter $(notdir $(FC)),amdflang flang flang-new),)
+else ifneq ($(filter $(notdir $(FC)),$(FLANG_FAMILY)),)
   DC_GPU_FLAGS ?= -fopenmp --offload-arch=$(AMD_GPU_ARCH) -fdo-concurrent-to-openmp=device -DDC_DATA_OMP
 else
   DC_GPU_FLAGS ?=

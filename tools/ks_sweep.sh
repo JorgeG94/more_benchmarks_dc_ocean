@@ -138,7 +138,7 @@ F90
 
 if [ "$COMPILERS" = auto ]; then
    FCS=()
-   for fc in nvfortran ifx flang flang-new amdflang gfortran; do
+   for fc in nvfortran ifx flang flang-new amdflang amdflang-new gfortran; do
       command -v "$fc" >/dev/null 2>&1 && FCS+=("$fc")
    done
 else
@@ -210,7 +210,7 @@ for fc in "${FCS[@]}"; do
    case "${fc##*/}" in
       nvfortran) [ $have_nvidia = 1 ] && { add_lane dc_gpu_acc "$fc"; add_lane dc_gpu_omp "$fc"; };;
       ifx)       [ $have_intel  = 1 ] && add_lane dc_gpu_vendor "$fc";;
-      amdflang|flang|flang-new)
+      amdflang|amdflang-new|flang|flang-new)
                  [ $have_amd    = 1 ] && add_lane dc_gpu_vendor "$fc";;
    esac
 done
