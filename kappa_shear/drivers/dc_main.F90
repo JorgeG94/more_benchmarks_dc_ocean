@@ -78,6 +78,8 @@ program dc_main
    !! line, so one run yields the whole head-to-head and the harness never has
    !! to correlate separate processes (or separate device allocations).
    integer, parameter :: MAXVAR = 3
+   !! arming survey totals, per variant (KS_COUNTERS builds)
+   integer(int64) :: arm_v(MAXVAR), armc_v(MAXVAR), callt_v(MAXVAR)
    !! vimpl = WHICH KERNEL (dc | cuda_faithful | cuda_opt). Kept distinct from
    !! the `variant` field, which is the Fortran ARRANGEMENT (faithful | block) --
    !! conflating the two would make the CSV unable to express "blocked DC vs
@@ -149,7 +151,9 @@ program dc_main
    allocate (ksh%kd_int(nx, ny, nz + 1), ksh%tke_int(nx, ny, nz + 1))
 #ifdef KS_COUNTERS
    allocate (ksh%it_outer(nx, ny), ksh%it_inner(nx, ny))
+   allocate (ksh%it_arm(nx, ny), ksh%it_armcall(nx, ny), ksh%it_call(nx, ny))
    ksh%it_outer = 0; ksh%it_inner = 0
+   ksh%it_arm = 0; ksh%it_armcall = 0; ksh%it_call = 0
 #endif
 #ifdef KS_WITH_CUDA
    allocate (kd_cu(nx, ny, nz + 1), tke_cu(nx, ny, nz + 1))
@@ -183,6 +187,34 @@ program dc_main
    !! Nothing here touches ks.F90; these are all runtime fields.
    dt_step = DT_THERM
    phys_prof = 'faithful'
+   !! Convergence tolerance of the Picard loop, overridable so the SOLVER can be
+   !! studied without changing it. MOM6 switches to its Newton branch once the
+   !! error is below Newton_err=0.2 and stops at tol_err=0.1, so Newton only ever
+   !! covers 0.2 -> 0.1. Sweeping tol_err measures how much work Picard spends
+   !! over that stretch, i.e. the most Newton could possibly save.
+   !! kappa_trunc is the threshold that zeroes kappa and ENDS the active range,
+   !! i.e. the only thing that can trigger the truncation exit. Overridable so a
+   !! truncate-then-un-truncate case can be constructed on demand: at the shipped
+   !! value the exit is essentially never taken, so a range-convention change
+   !! looks inert when it is merely unreached.
+   call get_environment_variable('KS_KAPPA_TRUNC', envbuf, status=ios)
+   if (ios == 0 .and. len_trim(envbuf) > 0) then
+      read (envbuf, *, iostat=ios) ksh%kappa_trunc
+      if (ios /= 0) ksh%kappa_trunc = 1.0e-9_wp
+   end if
+   !! Raised only to build a CONVERGED reference: at tol_err far below 0.1 the
+   !! default cap binds and the run stops short of the fixed point, which would
+   !! make the reference itself unconverged and the comparison meaningless.
+   call get_environment_variable('KS_MAX_INNER_IT', envbuf, status=ios)
+   if (ios == 0 .and. len_trim(envbuf) > 0) then
+      read (envbuf, *, iostat=ios) ksh%max_inner_it
+      if (ios /= 0 .or. ksh%max_inner_it < 1) ksh%max_inner_it = 50
+   end if
+   call get_environment_variable('KS_TOL_ERR', envbuf, status=ios)
+   if (ios == 0 .and. len_trim(envbuf) > 0) then
+      read (envbuf, *, iostat=ios) ksh%tol_err
+      if (ios /= 0 .or. ksh%tol_err <= 0.0_wp) ksh%tol_err = 0.1_wp
+   end if
    call get_environment_variable('KS_PHYS', envbuf, status=ios)
    if (ios == 0 .and. trim(envbuf) == 'prod') then
       phys_prof = 'prod'
@@ -231,6 +263,9 @@ program dc_main
 #ifdef KS_COUNTERS
    DC_ENTER_CREATE(ksh%it_outer)
    DC_ENTER_CREATE(ksh%it_inner)
+   DC_ENTER_CREATE(ksh%it_arm)
+   DC_ENTER_CREATE(ksh%it_armcall)
+   DC_ENTER_CREATE(ksh%it_call)
 #endif
 #ifdef KS_WITH_CUDA
    ! DC_ENTER_IN (not CREATE): these arrive on the device already zeroed, which
@@ -460,8 +495,14 @@ contains
 #ifdef KS_COUNTERS
          DC_UPDATE_SELF(ksh%it_outer)
          DC_UPDATE_SELF(ksh%it_inner)
+         DC_UPDATE_SELF(ksh%it_arm)
+         DC_UPDATE_SELF(ksh%it_armcall)
+         DC_UPDATE_SELF(ksh%it_call)
          ito_v(iv) = sum(int(ksh%it_outer, int64))
          iti_v(iv) = sum(int(ksh%it_inner, int64))
+         arm_v(iv) = sum(int(ksh%it_arm, int64))
+         armc_v(iv) = sum(int(ksh%it_armcall, int64))
+         callt_v(iv) = sum(int(ksh%it_call, int64))
 #endif
 #ifdef KS_WITH_CUDA
       else
@@ -557,6 +598,9 @@ contains
       write (output_unit, '(2a)', advance='no') ' kd_max=', trim(rs(kdmax_v(iv)))
       write (output_unit, '(a,i0)', advance='no') ' it_outer=', ito_v(iv)
       write (output_unit, '(a,i0)', advance='no') ' it_inner=', iti_v(iv)
+      write (output_unit, '(a,i0)', advance='no') ' it_arm=', arm_v(iv)
+      write (output_unit, '(a,i0)', advance='no') ' arm_calls=', armc_v(iv)
+      write (output_unit, '(a,i0)', advance='no') ' calls=', callt_v(iv)
       write (output_unit, '(a,i0)', advance='no') ' regs=', regs_v(iv)
       write (output_unit, '(a,i0)') ' local_b=', lmem_v(iv)
    end subroutine emit_result

@@ -61,6 +61,40 @@ VLEN ?= 1
 # NZSTACK must be swept together or neither is interpretable.
 BCOPY ?= 0
 
+# KERANGE: the convention for the END of the active kappa range. `legacy` is
+# what every recorded run used and what all three implementations agree on.
+# `mom6` matches MOM_kappa_shear.F90, which assigns ke_kappa only on the
+# truncation exit and otherwise leaves the previous iteration's value standing;
+# tracking it every step instead widens the range back to nz, which is MOM6's
+# NEWTON-branch convention applied in the Picard branch.
+# This CHANGES ANSWERS -- own build tag, own reference dump, never mixed.
+# Defined HERE, above the TAG block and the CUFLAGS: make evaluates `ifeq` at
+# parse time, so a `?=` below its own test silently leaves the variable empty
+# (the same foot-gun that once tagged every build `-notc`).
+# NEWTON=1 (default) runs MOM6's two-phase solver: Picard until both increments
+# are within 20% of their local means, then a block-tridiagonal Newton solve of
+# the coupled (kappa,TKE) system. NEWTON=0 is Picard-only, the pre-parity
+# behaviour. CHANGES ANSWERS -- own tag, own reference dump.
+# Default 0 = Picard only, which is what production MOM6 ACTUALLY DOES: its
+# two-phase solver is unreachable at the default KAPPA_SHEAR_TOL_ERR=0.1
+# (measured in MOM6 itself: 24/2,179,483 sweeps on the h-point benchmark,
+# 308/1,184,175 on benchmark_ALE's vertex path). NEWTON=1 builds the ported
+# solver, which is the right code for a tighter-tolerance configuration and the
+# evidence for the upstream report -- but it is NOT in the CUDA kernels, so
+# `make cmp NEWTON=1` would compare two different algorithms. Don't.
+NEWTON ?= 0
+ifeq ($(NEWTON),1)
+  DEFS_NEWTON :=
+else
+  DEFS_NEWTON := -DKS_NO_NEWTON
+endif
+
+KERANGE ?= legacy
+KERANGE_CU :=
+ifeq ($(KERANGE),mom6)
+  KERANGE_CU := -DKS_KE_MOM6
+endif
+
 # 1 -> -DKS_COUNTERS: per-column outer-substep / inner-Picard iteration counts,
 # written to ks%it_outer / ks%it_inner and summed by the driver. This is the
 # WORK metric -- without it you cannot tell "more layers" from "more
@@ -85,6 +119,12 @@ endif
 ifeq ($(BCOPY),1)
   TAG := $(TAG)-bc
 endif
+ifeq ($(KERANGE),mom6)
+  TAG := $(TAG)-ke6
+endif
+ifeq ($(NEWTON),1)
+  TAG := $(TAG)-newt
+endif
 ifeq ($(CNT),1)
   TAG := $(TAG)-cnt
 endif
@@ -100,6 +140,11 @@ DEFS      := $(DEFS_SIZE) -DKS_VLEN=$(VLEN)
 ifeq ($(BCOPY),1)
   DEFS += -DKS_BOUNDED_COPY
 endif
+
+ifeq ($(KERANGE),mom6)      # see the KERANGE block near the top
+  DEFS += -DKS_KE_MOM6
+endif
+DEFS += $(DEFS_NEWTON)
 ifeq ($(CNT),1)
   DEFS += -DKS_COUNTERS
 endif
@@ -182,7 +227,7 @@ ifeq ($(CUVARIANT),faithful)
 else ifeq ($(CUVARIANT),opt)
   CU_KERNEL := opt_kernel.cu
   CUVFLAGS  := -DKS_USE_OPT -DKS_OPT_NZMAX=$(OPT_NZMAX) \
-               -DKS_MINBLOCKS=$(MINBLOCKS) -DIDX32=$(IDX32)
+               -DKS_MINBLOCKS=$(MINBLOCKS) -DIDX32=$(IDX32) $(KERANGE_CU)
   CUVTAG    := -opt$(OPT_NZMAX)
   ifneq ($(MINBLOCKS),0)
     CUVTAG := $(CUVTAG)-mb$(MINBLOCKS)
@@ -229,7 +274,7 @@ CMP_FFLAGS  := $(FFLAGS_BASE) -I../common $(DEFS) -DKS_WITH_CUDA \
                $(TC_FLAG) -DDC_DATA_ACC
 CMP_CUFLAGS := -O3 $(GPU_ARCHFLAG) -I../common --compiler-options -fPIC \
                $(DEFS_SIZE) -DKS_OPT_NZMAX=$(OPT_NZMAX) \
-               -DKS_MINBLOCKS=$(MINBLOCKS) -DIDX32=$(IDX32)
+               -DKS_MINBLOCKS=$(MINBLOCKS) -DIDX32=$(IDX32) $(KERANGE_CU)
 ifeq ($(FULLCOPY),1)
   CMP_CUFLAGS += -DKS_FULL_COPY
 endif

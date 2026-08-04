@@ -434,7 +434,7 @@ __device__ void ks_find_kappa_tke(int nz, double tke_min, double f2_val,
       dk_sc[1] = 0.0;
       ck_sc[2] = 0.0;
       double ckc_l = 1.0;
-      int ke_new = 0;
+      int ke_new = 0; (void)ke_new;
       int ks_new = nz;
       for (int kk = 2; kk <= nz; ++kk) {
          dk_sc[kk] = -kappa_o[kk];
@@ -457,12 +457,16 @@ __device__ void ks_find_kappa_tke(int nz, double tke_min, double f2_val,
          } else if (kappa_o[kk] < tr2v) {
             kappa_o[kk] = 2.0 * (kappa_o[kk] - trv);
          }
+#ifndef KS_KE_MOM6
          ke_new = kk;
+#endif
       }
       // Fortran `exit` leaves the loop and FALLS THROUGH to the statement
       // after `end do` -- so this runs even on the early exit, clobbering the
       // `ke_kap = kk-1` just assigned. Reproduced deliberately.
+#ifndef KS_KE_MOM6
       if (ke_new > 0) ke_kap = ke_new;
+#endif
 
       if (ke_kap >= 1 && tke_o[ke_kap] > 0.0)
          k_q_io[ke_kap] = kappa_o[ke_kap] / tke_o[ke_kap];
