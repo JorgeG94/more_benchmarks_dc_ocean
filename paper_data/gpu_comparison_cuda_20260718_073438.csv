@@ -1,0 +1,2 @@
+kernel,dc_ms,gpuc_ms,dc_over_gpuc,backend,nx,ny,nz
+continuity_layered,0.3112,NaN,NaN,cuda,160,100,30

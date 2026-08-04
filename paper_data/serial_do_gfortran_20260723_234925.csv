@@ -1,0 +1,10 @@
+kernel,mode,compiler,compiler_version,flags,threads,nx,ny,nz,reps,warm,ms_per_step,git_hash,host,timestamp
+continuity_layered,serial_do,gfortran,"GNU Fortran (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,29.6179,7ea6c27,Big-Chungus,20260723_234925
+redi,serial_do,gfortran,"GNU Fortran (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,742.2686,7ea6c27,Big-Chungus,20260723_234925
+kappa_shear,serial_do,gfortran,"GNU Fortran (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,260.2823,7ea6c27,Big-Chungus,20260723_234925
+ale_remap,serial_do,gfortran,"GNU Fortran (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,72.8409,7ea6c27,Big-Chungus,20260723_234925
+btstep,serial_do,gfortran,"GNU Fortran (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,22.2576,7ea6c27,Big-Chungus,20260723_234925
+epbl,serial_do,gfortran,"GNU Fortran (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,109.0069,7ea6c27,Big-Chungus,20260723_234925
+meke,serial_do,gfortran,"GNU Fortran (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,2.4343,7ea6c27,Big-Chungus,20260723_234925
+hvisc,serial_do,gfortran,"GNU Fortran (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,13.0344,7ea6c27,Big-Chungus,20260723_234925
+hll_fluxes,serial_do,gfortran,"GNU Fortran (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,2.9601,7ea6c27,Big-Chungus,20260723_234925

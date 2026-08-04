@@ -1,0 +1,10 @@
+kernel,layer,nx,ny,nz,ms_per_step
+continuity_layered,acc,160,100,30,0.3140
+redi,acc,160,100,30,6.3503
+kappa_shear,acc,160,100,30,5.9166
+ale_remap,acc,160,100,30,1.6549
+btstep,acc,160,100,30,2.1639
+epbl,acc,160,100,30,2.3123
+meke,acc,160,100,30,0.2127
+hvisc,acc,160,100,30,0.2480
+hll_fluxes,acc,160,100,30,0.0449
