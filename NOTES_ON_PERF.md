@@ -293,6 +293,51 @@ which invalidates exactly the codegen ratio being measured. It now comes from
 `nvidia-smi --query-gpu=compute_cap`, is printed in the sweep banner, passed to
 every `make`, and recorded per row.
 
+### 3b. NZ_STACK_MAX is catastrophic on MI250X and irrelevant on NVIDIA
+
+**This overturns the "the frame does not matter" conclusion recorded above and
+in kappa_shear/OPTIMIZATION.md.** Both were measured on NVIDIA. They do not
+transfer.
+
+Same source, same binary but for one compile-time constant, and `it_inner` is
+IDENTICAL between the two policies at every nz -- so the work is provably the
+same and the whole difference is the per-thread frame. `prod` / `fit` cost ratio:
+
+| nz | MI250X (1 GCD, amdflang) | GH200 (nvfortran) | V100 (nvfortran) |
+|---|---|---|---|
+| 10 | **14.8x** | 1.08x | 1.13x |
+| 25 | **2.9x** | 1.03x | 1.03x |
+| 30 | **3.0x** | 1.01x | 1.02x |
+| 50 | 1.1x | 0.99x | 0.99x |
+| 100 | 1.0x | 0.98x | 0.99x |
+
+Normalised to V100 = 1.00 at nz=30: GH200 3.10x (fit) / 3.12x (prod), MI250X
+**1.19x (fit) / 0.40x (prod)**. At the setting production actually compiles,
+one MI250X GCD is 2.5x SLOWER than a 2017 V100 on this kernel; with the frame
+fitted to the column it is 1.19x faster. The constant is worth 3x on that
+hardware and ~0% on NVIDIA.
+
+**MOM6 consequence.** Production compiles `NZ_STACK_MAX=128` and runs nz=30-75.
+On AMD that is a ~3x penalty at nz=30 for free. Per-GCD is the correct unit
+here, not a caveat to scale up: MOM6 runs one rank per GCD (Frontier has 4x
+MI250X = 8 GCDs/node) and one rank per GPU on GH200, so these ARE the per-rank
+figures.
+
+⚠ **The MI250X `prod` series is NON-MONOTONIC and must not be quoted point by
+point**: 723, 495, 681, 504, 806, 1170 ns/col over nz = 10..100. nz=10 costs
+more than nz=25 despite an identical frame and 9x FEWER Picard iterations
+(300k vs 2.78M), which is not physically possible. The `fit` series on the same
+machine is perfectly monotonic (49, 169, 225, 459, 849, 1144), so the harness is
+sound and the instability is specific to the large-frame builds -- consistent
+with occupancy collapsing to very few waves at 66 KB/thread of scratch. Check
+ms_med vs ms_min before quoting any single `prod` point. The QUALITATIVE finding
+does not depend on it: `fit` at nz=30 is 225 ns/col and every `prod`
+measurement is 495-806.
+
+⚠ **Cross-machine absolute numbers are four confounds deep** (compiler, offload
+model, architecture, and 1 GCD vs a whole GPU). The prod-vs-fit RATIO is
+within-machine and carries none of them; that is what the finding rests on.
+
 ### 4. CPU: thread scaling, and the arrangement question
 
 **Serial `do concurrent` costs NOTHING versus plain nested `do` loops** — on
