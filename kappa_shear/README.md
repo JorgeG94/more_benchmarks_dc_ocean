@@ -28,11 +28,51 @@ per-thread column arrays identically.
 make dc                 # do concurrent, OpenACC on the NVIDIA GPU   [default]
 make dc DATA=omp        # do concurrent, OpenMP target (NVIDIA now; AMD/Intel with their compilers)
 make dc DATA=none       # do concurrent on the CPU (-stdpar=multicore) -- NO CUDA, NO OpenACC
-make cpp                # native C++/CUDA (cudaMalloc), no Fortran
-make cpp BACKEND=hip    # native C++/HIP -- structural (needs ROCm/hipcc)
+make cmp                # THE HEAD-TO-HEAD: one Fortran binary running
+                        #   do concurrent + cuda_faithful + cuda_opt on the SAME
+                        #   device allocation, one RESULT line each
+make serialdo           # plain nested `do` baseline (binary `sdo`), any F2008 FC
 make verify             # OpenACC-GPU dumps a ref; the CPU build recomputes + cross-checks it
-make run-dc / run-cpp / clean
+make verify-variant     # faithful vs VARIANT=block bit-identity gate (strict FP)
+make run-dc / run-cmp / clean
+
+make cpp                # historical control only -- see "Why cmp, not cpp" below
 ```
+
+## Why `cmp`, not `cpp`
+
+`drivers/cpp_main.cu` is a standalone C++ `main()`, so it has to HAND-MIRROR
+`build_state` in C++. A mirror that drifts even slightly measures a different
+problem, silently, and a wall-clock number cannot tell you that -- which is why
+that file carries ~150 lines of `[RISK A]` / `[RISK B]` machinery whose whole
+job is to prove its inputs match the Fortran's. It also walks into the
+cross-language libm trap (`CLAUDE.md`): nvfortran's and glibc's `sin`/`exp`
+disagree in the last ulp.
+
+`make cmp` deletes both problems. It compiles the SAME `drivers/dc_main.F90`
+with `-DKS_WITH_CUDA`, links both hand-written CUDA kernels, and launches them
+through `!$acc host_data use_device` on the device pointers `do concurrent` just
+used. One state builder, one allocation, one process, three RESULT lines. The
+sweep uses only this; `cpp` is kept as the historical no-Fortran control that
+established OpenACC adds no launch overhead.
+
+## The 1:1 pairing (read before quoting any DC-vs-CUDA ratio)
+
+`ks_solve_column`'s three whole-array assignments copy the DECLARED extent in
+Fortran -- O(NZ_STACK_MAX) -- but both CUDA kernels bounded them to `1..nz+1`,
+O(nz) (`ks_kernel.cu:798`). Comparing across that gap times the copy, not the
+codegen. `-DKS_FULL_COPY` (`make cmp FULLCOPY=1`) now lets the faithful CUDA
+kernel reproduce the Fortran copy, and the two sides are built as MATCHED pairs:
+
+| pairing | build | dc / cuda_faithful, 473x297x30, V100 |
+|---|---|---|
+| mismatched (historical) | `BCOPY=0`, `FULLCOPY=0` | 1.140x |
+| matched `prod` (both O(NZSTACK)) | `BCOPY=0`, `FULLCOPY=1` | **1.106x** |
+| matched `opt` (both O(nz)) | `BCOPY=1`, `FULLCOPY=0` | **1.112x** |
+
+So the copy asymmetry was inflating CUDA's advantage by ~3 points -- about a
+quarter of the claimed gap. `cuda_opt` always bounds the copy and therefore only
+ever belongs to the `opt` pairing.
 
 Args: `nxp nyp nz nreps nwarm [land_pct]` (default `473 297 30 8 2`). The DC-only
 driver drops the old bench's trailing `cuda_sync` flag; the native `cpp` driver

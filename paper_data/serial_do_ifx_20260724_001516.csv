@@ -1,0 +1,10 @@
+kernel,mode,compiler,compiler_version,flags,threads,nx,ny,nz,reps,warm,ms_per_step,git_hash,host,timestamp
+continuity_layered,serial_do,ifx,"ifx (IFX) 2026.0.0 20260331","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,29.8085,7ea6c27,Big-Chungus,20260724_001516
+redi,serial_do,ifx,"ifx (IFX) 2026.0.0 20260331","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,738.6054,7ea6c27,Big-Chungus,20260724_001516
+kappa_shear,serial_do,ifx,"ifx (IFX) 2026.0.0 20260331","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,263.4289,7ea6c27,Big-Chungus,20260724_001516
+ale_remap,serial_do,ifx,"ifx (IFX) 2026.0.0 20260331","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,75.1684,7ea6c27,Big-Chungus,20260724_001516
+btstep,serial_do,ifx,"ifx (IFX) 2026.0.0 20260331","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,22.5984,7ea6c27,Big-Chungus,20260724_001516
+epbl,serial_do,ifx,"ifx (IFX) 2026.0.0 20260331","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,109.3416,7ea6c27,Big-Chungus,20260724_001516
+meke,serial_do,ifx,"ifx (IFX) 2026.0.0 20260331","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,2.3985,7ea6c27,Big-Chungus,20260724_001516
+hvisc,serial_do,ifx,"ifx (IFX) 2026.0.0 20260331","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,12.9906,7ea6c27,Big-Chungus,20260724_001516
+hll_fluxes,serial_do,ifx,"ifx (IFX) 2026.0.0 20260331","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,2.9611,7ea6c27,Big-Chungus,20260724_001516

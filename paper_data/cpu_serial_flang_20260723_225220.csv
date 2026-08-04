@@ -1,0 +1,10 @@
+kernel,compiler,nx,ny,nz,ms_per_step
+continuity_layered,flang,160,100,30,21.4772
+redi,flang,160,100,30,698.9959
+kappa_shear,flang,160,100,30,275.1242
+ale_remap,flang,160,100,30,95.0480
+btstep,flang,160,100,30,25.5674
+epbl,flang,160,100,30,144.9076
+meke,flang,160,100,30,2.0033
+hvisc,flang,160,100,30,9.6355
+hll_fluxes,flang,160,100,30,2.7003

@@ -2,22 +2,18 @@
 !! the ocean model's kappa-shear (JHL08) column kernel, extracted for the
 !! `do concurrent` vs hand-written-CUDA-C benchmark.
 !!
-!! SOURCE: <model>/src/parameterizations/vertical/structured/ocean_kappa_shear.F90
-!! (1443 lines). The six column-solve helpers —
 !!   ks_src_func         (:474-490)
 !!   ks_precompute       (:492-553)
 !!   ks_projected_state  (:555-692)
 !!   ks_find_kappa_tke   (:694-934)
 !!   ks_adaptive_dt      (:936-1064)
 !!   ks_solve_column     (:1066-1430)
-!! — are VERBATIM. Not one arithmetic line was changed.
 !!
 !! ============================================================================
 !! ⚠ WHAT WAS DROPPED, AND WHY — READ THIS BEFORE QUOTING ANY NUMBER
 !! ============================================================================
 !! This is a TRANSCRIPTION of `kappa_shear_column_kernel` (:296-466), not a
-!! verbatim copy. Exactly three things were removed. Each is dead in the
-!! production configs (~/analysis_gebco/gabight_sph_acc_v100.nml and siblings):
+!! verbatim copy. Exactly three things were removed. 
 !!
 !! 1. THE D4 MASSLESS-MERGE PATH (production :336-341, :378-386, :390-420).
 !!    Gated on `this%massless_merge`, whose default is `.false.`
@@ -47,6 +43,13 @@
 !! Nothing else changed. In particular the `do concurrent(j,i) local(...)`
 !! clause, the gather/scatter index flip, the `wet_mask` gate, and the
 !! `!$acc routine seq` markers on all six helpers are as shipped.
+!!
+!! 4. (LATER) -DKS_COUNTERS adds per-column iteration counters -- the WORK
+!!    metric the nz sweep needs to separate "more layers" from "more
+!!    iterations". They are integer counts only: NO arithmetic line changed,
+!!    and they are compiled out entirely by default. NEVER time a KS_COUNTERS
+!!    build -- this kernel is register-bound (see OPTIMIZATION.md), so the
+!!    extra live integers are not free. tools/ks_sweep.sh runs them separately.
 !! ============================================================================
 module ks
    use constants, only: wp, GRAVITY, NZ_STACK_MAX, H_VANISHED
@@ -58,9 +61,15 @@ module ks
 
    public :: ocean_kappa_shear_t
    public :: kappa_shear_column_kernel
+   public :: KS_VARIANT, KS_LANES
 
    integer, parameter :: NZL = NZ_STACK_MAX
    integer, parameter :: NZLI = NZ_STACK_MAX + 1
+
+   !! Build identity, so the driver can stamp every result row with the
+   !! arrangement it actually measured instead of the harness guessing.
+   character(len=*), parameter :: KS_VARIANT = 'faithful'
+   integer, parameter :: KS_LANES = 1
 
    !! Knob defaults VERBATIM from ocean_kappa_shear.F90:64-145 (the JHL08 /
    !! OM4 production values). `massless_merge` is gone with the merge path.
@@ -88,7 +97,36 @@ module ks
       real(wp), allocatable :: f_centre(:, :)
       real(wp), allocatable :: kd_int(:, :, :)
       real(wp), allocatable :: tke_int(:, :, :)
+#ifdef KS_COUNTERS
+      !! WORK METRIC (KS_COUNTERS builds only). Per column: substeps actually
+      !! executed, and total Picard iterations summed over every
+      !! ks_find_kappa_tke call in the column. Written, never read, by the
+      !! kernel -- so no reduction and no atomics; the driver sums on the host.
+      integer, allocatable :: it_outer(:, :)
+      integer, allocatable :: it_inner(:, :)
+#endif
    end type ocean_kappa_shear_t
+
+#ifdef KS_COUNTERS
+#define KS_CNT_LOCALS , n_out_l, n_in_l
+#else
+#define KS_CNT_LOCALS
+#endif
+
+#ifdef DC_DATA_OMP
+   !! ⚠ ifx NEEDS THIS AT MODULE SCOPE, and it is a WARNING not an error.
+   !! The per-procedure `DC_ROUTINE_SEQ` (-> `!$omp declare target` inside each
+   !! helper) is accepted by nvfortran but NOT honoured by ifx: it still reports
+   !!   warning #5476: The DO CONCURRENT construct will not be offloaded; it
+   !!   contains a call to a procedure that has not been specified in a DECLARE
+   !!   TARGET directive
+   !! and then COMPILES AND RUNS ON THE HOST ANYWAY. A `dc_gpu_vendor` lane
+   !! would happily record host timings as Intel GPU results. This module-scope
+   !! list is what ifx actually accepts; it is additive, so the per-procedure
+   !! markers stay for the compilers that use them.
+   !$omp declare target(ks_src_func, ks_precompute, ks_projected_state)
+   !$omp declare target(ks_find_kappa_tke, ks_adaptive_dt, ks_solve_column)
+#endif
 
 contains
 
@@ -104,15 +142,71 @@ contains
       real(wp), intent(in) :: hS(:, :, :)
       real(wp), intent(in) :: dt
 
-      integer :: i, j, k, kg, nx, ny, nz
+      call ks_columns_dc(grid%nx_total, grid%ny_total, ms%nz_ml, dt, &
+                         ms, hT, hS, this%f_centre, this%lz_rescale, &
+                         this%rho0, this%ri_crit, this%shearmix_rate, &
+                         this%fri_curvature, this%c_n, this%c_s, &
+                         this%lambda, this%kappa_0, this%kappa_seed, &
+                         this%kappa_trunc, this%tke_bg, this%tol_err, &
+                         this%max_inner_it, this%max_substep_it, &
+                         this%src_max_chg, this%vel_underflow, this%eos, &
+                         this%kd_int, this%tke_int &
+#ifdef KS_COUNTERS
+                         , this%it_outer, this%it_inner &
+#endif
+                         )
+   end subroutine kappa_shear_column_kernel
+
+   pure subroutine ks_columns_dc(nx, ny, nz, dt, ms, hT, hS, f_centre, &
+                                 lz_rescale, rho0, ri_crit, shearmix_rate, &
+                                 fri_curvature, c_n, c_s, lambda, kappa_0, &
+                                 kappa_seed, kappa_trunc, tke_bg, tol_err, &
+                                 max_inner_it, max_substep_it, src_max_chg, &
+                                 vel_underflow, eos, kd_int, tke_int &
+#ifdef KS_COUNTERS
+                                 , it_outer, it_inner &
+#endif
+                                 )
+      !! ⚠ THIS SPLIT EXISTS FOR ONE COMPILER, AND IS NUMERICALLY INERT.
+      !! The `do concurrent` body used to live directly in
+      !! `kappa_shear_column_kernel` and reference `this%…` throughout. AMD
+      !! flang's `-fdo-concurrent-to-openmp=device` pass cannot map a derived
+      !! type that has a derived-type COMPONENT:
+      !!   DoConcurrentConversion.cpp:603: not yet implemented:
+      !!   Nested record types are not supported yet.
+      !! `ocean_kappa_shear_t` has exactly one — `type(ocean_eos_t) :: eos` —
+      !! and that alone is fatal even for a loop that never reads it (the pass
+      !! rejects on the TYPE of a referenced variable, not on the reference).
+      !! So the outer routine is now a host-side shim that dereferences `this`,
+      !! and the loop sees only plain scalars, plain arrays, and the FLAT
+      !! `ocean_eos_t` — which the pass accepts. This mirrors what production's
+      !! own `kappa_shear_compute` shim (:276-294) already does for the tracer
+      !! registry. Not one arithmetic line changed; `make verify` is the gate.
+      integer, intent(in) :: nx, ny, nz
+      real(wp), intent(in) :: dt
+      type(multilayer_cgrid_state_t), intent(in) :: ms
+      real(wp), intent(in) :: hT(:, :, :)
+      real(wp), intent(in) :: hS(:, :, :)
+      real(wp), intent(in) :: f_centre(:, :)
+      real(wp), intent(in) :: lz_rescale, rho0, ri_crit, shearmix_rate
+      real(wp), intent(in) :: fri_curvature, c_n, c_s, lambda
+      real(wp), intent(in) :: kappa_0, kappa_seed, kappa_trunc, tke_bg, tol_err
+      integer, intent(in) :: max_inner_it, max_substep_it
+      real(wp), intent(in) :: src_max_chg, vel_underflow
+      type(ocean_eos_t), intent(in) :: eos
+      real(wp), intent(inout) :: kd_int(:, :, :), tke_int(:, :, :)
+#ifdef KS_COUNTERS
+      integer, intent(inout) :: it_outer(:, :), it_inner(:, :)
+#endif
+
+      integer :: i, j, k, kg
       real(wp) :: f2_val, hk, inv_h
       real(wp) :: h_sd(NZL), u_sd(NZL), v_sd(NZL), t_sd(NZL), s_sd(NZL)
       real(wp) :: idz_s(NZL), idz_int_s(NZLI), hint_s(NZLI), il2_s(NZLI)
       real(wp) :: kappa_avg_sd(NZLI), tke_avg_sd(NZLI)
-
-      nx = grid%nx_total
-      ny = grid%ny_total
-      nz = ms%nz_ml
+#ifdef KS_COUNTERS
+      integer :: n_out_l, n_in_l
+#endif
 
       do j=1,ny
       do i=1,nx
@@ -122,6 +216,10 @@ contains
             kappa_avg_sd(k) = 0.0_wp
             tke_avg_sd(k) = 0.0_wp
          end do
+#ifdef KS_COUNTERS
+         n_out_l = 0
+         n_in_l = 0
+#endif
 
          if (ms%wet_mask(i, j) > 0.0_wp) then
             ! ---- Gather with the index flip (local k=1 = surface) ----
@@ -134,7 +232,7 @@ contains
                                  ms%v_face_y_layer(i, j + 1, kg))
             end do
 
-            f2_val = this%f_centre(i, j)*this%f_centre(i, j)
+            f2_val = f_centre(i, j)*f_centre(i, j)
 
             ! ---- Gather floor at H_VANISHED, solve on nz. (Production's
             !      `else` branch — the live one; `do_merge` is always false.)
@@ -147,35 +245,43 @@ contains
                s_sd(k) = hS(i, j, kg)*inv_h
             end do
 
-            call ks_precompute(nz, this%lz_rescale, h_sd, &
+            call ks_precompute(nz, lz_rescale, h_sd, &
                                idz_s, idz_int_s, hint_s, il2_s)
 
-            call ks_solve_column(nz, dt, f2_val, this%rho0, &
-                                 this%ri_crit, this%shearmix_rate, &
-                                 this%fri_curvature, this%c_n, this%c_s, &
-                                 this%lambda, this%kappa_0, this%kappa_seed, &
-                                 this%kappa_trunc, this%tke_bg, this%tol_err, &
-                                 this%max_inner_it, this%max_substep_it, &
-                                 this%src_max_chg, this%vel_underflow, &
-                                 this%eos, &
+            call ks_solve_column(nz, dt, f2_val, rho0, &
+                                 ri_crit, shearmix_rate, &
+                                 fri_curvature, c_n, c_s, &
+                                 lambda, kappa_0, kappa_seed, &
+                                 kappa_trunc, tke_bg, tol_err, &
+                                 max_inner_it, max_substep_it, &
+                                 src_max_chg, vel_underflow, &
+                                 eos, &
                                  h_sd, u_sd, v_sd, t_sd, s_sd, &
                                  idz_s, idz_int_s, hint_s, il2_s, &
-                                 kappa_avg_sd, tke_avg_sd)
+                                 kappa_avg_sd, tke_avg_sd &
+#ifdef KS_COUNTERS
+                                 , n_out_l, n_in_l &
+#endif
+                                 )
          end if
 
          ! ---- Scatter with the flip; force exact 0 at bed + surface ----
          do k = 1, nz + 1
             kg = nz + 2 - k
-            this%kd_int(i, j, kg) = kappa_avg_sd(k)
-            this%tke_int(i, j, kg) = tke_avg_sd(k)
+            kd_int(i, j, kg) = kappa_avg_sd(k)
+            tke_int(i, j, kg) = tke_avg_sd(k)
          end do
-         this%kd_int(i, j, 1) = 0.0_wp
-         this%kd_int(i, j, nz + 1) = 0.0_wp
-         this%tke_int(i, j, 1) = 0.0_wp
-         this%tke_int(i, j, nz + 1) = 0.0_wp
+         kd_int(i, j, 1) = 0.0_wp
+         kd_int(i, j, nz + 1) = 0.0_wp
+         tke_int(i, j, 1) = 0.0_wp
+         tke_int(i, j, nz + 1) = 0.0_wp
+#ifdef KS_COUNTERS
+         it_outer(i, j) = n_out_l
+         it_inner(i, j) = n_in_l
+#endif
       end do
       end do
-   end subroutine kappa_shear_column_kernel
+   end subroutine ks_columns_dc
 
    ! =================================================================
    ! Column solve helpers — VERBATIM from production :474-1430.
@@ -397,7 +503,11 @@ contains
                                      idz_s, hint_s, il2_s, e1_s, &
                                      tke_o, kappa_o, &
                                      ksrc_sc, tkedec_sc, aq_sc, dq_sc, cq_sc, &
-                                     dk_sc, ck_sc, ild2_sc)
+                                     dk_sc, ck_sc, ild2_sc &
+#ifdef KS_COUNTERS
+                                     , n_it &
+#endif
+                                     )
       DC_ROUTINE_SEQ
       integer, intent(in) :: nz, max_inner_it
       real(wp), intent(in) :: tke_min, f2_val
@@ -412,6 +522,9 @@ contains
       real(wp), intent(inout) :: ksrc_sc(NZLI), tkedec_sc(NZLI)
       real(wp), intent(inout) :: aq_sc(NZL), dq_sc(NZLI), cq_sc(NZLI)
       real(wp), intent(inout) :: dk_sc(NZLI), ck_sc(NZLI), ild2_sc(NZLI)
+#ifdef KS_COUNTERS
+      integer, intent(out) :: n_it
+#endif
 
       integer :: kk, k, k2, it
       integer :: ks_src, ke_src, ks_kap, ke_kap, ks_kp, ke_kp, ke_tke
@@ -420,6 +533,9 @@ contains
       real(wp) :: bkd1_l, bk_l, trv, tr2v, lhs_l, rhs_l
       logical :: conv
 
+#ifdef KS_COUNTERS
+      n_it = 0
+#endif
       ks_src = nz + 2
       ke_src = 0
       ksrc_sc(1) = 0.0_wp
@@ -468,6 +584,9 @@ contains
       ke_kp = nz
 
       do it = 1, max_inner_it
+#ifdef KS_COUNTERS
+         n_it = n_it + 1
+#endif
          ! (a) TKE tridiagonal sweep.
          ke_tke = min(max(ke_kap, ke_kp) + 1, nz + 1)
          do k = 1, min(ke_tke, nz)
@@ -755,7 +874,11 @@ contains
                                    eos, &
                                    h_sd, u_sd, v_sd, t_sd, s_sd, &
                                    idz_s, idz_int_s, hint_s, il2_s, &
-                                   kappa_avg_sd, tke_avg_sd)
+                                   kappa_avg_sd, tke_avg_sd &
+#ifdef KS_COUNTERS
+                                   , n_out, n_in &
+#endif
+                                   )
       DC_ROUTINE_SEQ
       type(ocean_eos_t), intent(in) :: eos
       integer, intent(in) :: nz, max_inner_it, max_substep_it
@@ -769,6 +892,10 @@ contains
       real(wp), intent(in) :: idz_s(NZL), idz_int_s(NZLI)
       real(wp), intent(in) :: hint_s(NZLI), il2_s(NZLI)
       real(wp), intent(out) :: kappa_avg_sd(NZLI), tke_avg_sd(NZLI)
+#ifdef KS_COUNTERS
+      integer, intent(out) :: n_out, n_in
+      integer :: n_it_l
+#endif
 
       ! Per-thread work arrays (fixed size, surface-down).
       real(wp) :: u_c(NZL), v_c(NZL), t_c(NZL), s_c(NZL)
@@ -797,6 +924,11 @@ contains
       integer :: ks_ps, ke_ps, ks_mid, ke_mid
       logical :: no_mixing
 
+#ifdef KS_COUNTERS
+      n_out = 0
+      n_in = 0
+      n_it_l = 0
+#endif
       k0dt = dt*kappa_0
       tke_min = max(tke_bg, 1.0e-20_wp)
       c_n2 = c_n*c_n
@@ -914,6 +1046,9 @@ contains
 
       ! ---- Adaptive outer substepping ----
       do io = 1, max_substep_it
+#ifdef KS_COUNTERS
+         n_out = n_out + 1
+#endif
          ! Step 1: K_src + seed TKE from previous kappa/K_Q.
          ks_src = nz + 2
          ke_src = 0
@@ -981,7 +1116,14 @@ contains
                                    tol_err, max_inner_it, n2, s2, kappa, &
                                    kq_tmp, idz_s, hint_s, il2_s, e1, tke, &
                                    kappa_out, ksrc, tkedec, aq, dq, cq, dk, &
-                                   ck, ild2)
+                                   ck, ild2 &
+#ifdef KS_COUNTERS
+                                   , n_it_l &
+#endif
+                                   )
+#ifdef KS_COUNTERS
+            n_in = n_in + n_it_l
+#endif
             do kk = 1, nz + 1
                k_q(kk) = kq_tmp(kk)
             end do
@@ -1059,7 +1201,14 @@ contains
                                    tol_err, max_inner_it, n2p, s2p, kappa_out, &
                                    kq_tmp, idz_s, hint_s, il2_s, e1, tke_pred, &
                                    kappa_pred, ksrc, tkedec, aq, dq, cq, dk, &
-                                   ck, ild2)
+                                   ck, ild2 &
+#ifdef KS_COUNTERS
+                                   , n_it_l &
+#endif
+                                   )
+#ifdef KS_COUNTERS
+            n_in = n_in + n_it_l
+#endif
             do kk = 1, nz + 1
                kappa_mid(kk) = 0.5_wp*(kappa_out(kk) + kappa_pred(kk))
             end do
@@ -1085,7 +1234,14 @@ contains
                                    tol_err, max_inner_it, n2c, s2c, kappa_out, &
                                    k_q, idz_s, hint_s, il2_s, e1, tke_fin, &
                                    kappa_pred2, ksrc, tkedec, aq, dq, cq, dk, &
-                                   ck, ild2)
+                                   ck, ild2 &
+#ifdef KS_COUNTERS
+                                   , n_it_l &
+#endif
+                                   )
+#ifdef KS_COUNTERS
+            n_in = n_in + n_it_l
+#endif
             dt_rem = dt_rem - dt_now
             do kk = 1, nz + 1
                kappa_avg(kk) = kappa_avg(kk) + &

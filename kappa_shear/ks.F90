@@ -2,7 +2,6 @@
 !! the ocean model's kappa-shear (JHL08) column kernel, extracted for the
 !! `do concurrent` vs hand-written-CUDA-C benchmark.
 !!
-!! SOURCE: <model>/src/parameterizations/vertical/structured/ocean_kappa_shear.F90
 !! (1443 lines). The six column-solve helpers —
 !!   ks_src_func         (:474-490)
 !!   ks_precompute       (:492-553)
@@ -10,14 +9,12 @@
 !!   ks_find_kappa_tke   (:694-934)
 !!   ks_adaptive_dt      (:936-1064)
 !!   ks_solve_column     (:1066-1430)
-!! — are VERBATIM. Not one arithmetic line was changed.
 !!
 !! ============================================================================
 !! ⚠ WHAT WAS DROPPED, AND WHY — READ THIS BEFORE QUOTING ANY NUMBER
 !! ============================================================================
 !! This is a TRANSCRIPTION of `kappa_shear_column_kernel` (:296-466), not a
-!! verbatim copy. Exactly three things were removed. Each is dead in the
-!! production configs (~/analysis_gebco/gabight_sph_acc_v100.nml and siblings):
+!! verbatim copy. Exactly three things were removed. 
 !!
 !! 1. THE D4 MASSLESS-MERGE PATH (production :336-341, :378-386, :390-420).
 !!    Gated on `this%massless_merge`, whose default is `.false.`
@@ -47,6 +44,13 @@
 !! Nothing else changed. In particular the `do concurrent(j,i) local(...)`
 !! clause, the gather/scatter index flip, the `wet_mask` gate, and the
 !! `!$acc routine seq` markers on all six helpers are as shipped.
+!!
+!! 4. (LATER) -DKS_COUNTERS adds per-column iteration counters -- the WORK
+!!    metric the nz sweep needs to separate "more layers" from "more
+!!    iterations". They are integer counts only: NO arithmetic line changed,
+!!    and they are compiled out entirely by default. NEVER time a KS_COUNTERS
+!!    build -- this kernel is register-bound (see OPTIMIZATION.md), so the
+!!    extra live integers are not free. tools/ks_sweep.sh runs them separately.
 !! ============================================================================
 module ks
    use constants, only: wp, GRAVITY, NZ_STACK_MAX, H_VANISHED
@@ -58,9 +62,15 @@ module ks
 
    public :: ocean_kappa_shear_t
    public :: kappa_shear_column_kernel
+   public :: KS_VARIANT, KS_LANES
 
    integer, parameter :: NZL = NZ_STACK_MAX
    integer, parameter :: NZLI = NZ_STACK_MAX + 1
+
+   !! Build identity, so the driver can stamp every result row with the
+   !! arrangement it actually measured instead of the harness guessing.
+   character(len=*), parameter :: KS_VARIANT = 'faithful'
+   integer, parameter :: KS_LANES = 1
 
    !! Knob defaults VERBATIM from ocean_kappa_shear.F90:64-145 (the JHL08 /
    !! OM4 production values). `massless_merge` is gone with the merge path.
@@ -88,7 +98,41 @@ module ks
       real(wp), allocatable :: f_centre(:, :)
       real(wp), allocatable :: kd_int(:, :, :)
       real(wp), allocatable :: tke_int(:, :, :)
+#ifdef KS_COUNTERS
+      !! WORK METRIC (KS_COUNTERS builds only). Per column: substeps actually
+      !! executed, and total Picard iterations summed over every
+      !! ks_find_kappa_tke call in the column. Written, never read, by the
+      !! kernel -- so no reduction and no atomics; the driver sums on the host.
+      integer, allocatable :: it_outer(:, :)
+      integer, allocatable :: it_inner(:, :)
+      !! ARMING SURVEY (KS_COUNTERS only): per column, the Picard sweeps MOM6
+      !! would have run as Newton sweeps, the find_kappa_tke calls that reached
+      !! the arming condition, and the calls made. Ratios of these say how much
+      !! of this kernel's work MOM6 hands to a solver we do not have.
+      integer, allocatable :: it_arm(:, :), it_armcall(:, :), it_call(:, :)
+#endif
    end type ocean_kappa_shear_t
+
+#ifdef KS_COUNTERS
+#define KS_CNT_LOCALS , n_out_l, n_in_l, n_arm_l2, n_armc_l, n_callt_l
+#else
+#define KS_CNT_LOCALS
+#endif
+
+#ifdef DC_DATA_OMP
+   !! ⚠ ifx NEEDS THIS AT MODULE SCOPE, and it is a WARNING not an error.
+   !! The per-procedure `DC_ROUTINE_SEQ` (-> `!$omp declare target` inside each
+   !! helper) is accepted by nvfortran but NOT honoured by ifx: it still reports
+   !!   warning #5476: The DO CONCURRENT construct will not be offloaded; it
+   !!   contains a call to a procedure that has not been specified in a DECLARE
+   !!   TARGET directive
+   !! and then COMPILES AND RUNS ON THE HOST ANYWAY. A `dc_gpu_vendor` lane
+   !! would happily record host timings as Intel GPU results. This module-scope
+   !! list is what ifx actually accepts; it is additive, so the per-procedure
+   !! markers stay for the compilers that use them.
+   !$omp declare target(ks_src_func, ks_precompute, ks_projected_state)
+   !$omp declare target(ks_find_kappa_tke, ks_adaptive_dt, ks_solve_column)
+#endif
 
 contains
 
@@ -104,18 +148,76 @@ contains
       real(wp), intent(in) :: hS(:, :, :)
       real(wp), intent(in) :: dt
 
-      integer :: i, j, k, kg, nx, ny, nz
+      call ks_columns_dc(grid%nx_total, grid%ny_total, ms%nz_ml, dt, &
+                         ms, hT, hS, this%f_centre, this%lz_rescale, &
+                         this%rho0, this%ri_crit, this%shearmix_rate, &
+                         this%fri_curvature, this%c_n, this%c_s, &
+                         this%lambda, this%kappa_0, this%kappa_seed, &
+                         this%kappa_trunc, this%tke_bg, this%tol_err, &
+                         this%max_inner_it, this%max_substep_it, &
+                         this%src_max_chg, this%vel_underflow, this%eos, &
+                         this%kd_int, this%tke_int &
+#ifdef KS_COUNTERS
+                         , this%it_outer, this%it_inner, &
+                         this%it_arm, this%it_armcall, this%it_call &
+#endif
+                         )
+   end subroutine kappa_shear_column_kernel
+
+   pure subroutine ks_columns_dc(nx, ny, nz, dt, ms, hT, hS, f_centre, &
+                                 lz_rescale, rho0, ri_crit, shearmix_rate, &
+                                 fri_curvature, c_n, c_s, lambda, kappa_0, &
+                                 kappa_seed, kappa_trunc, tke_bg, tol_err, &
+                                 max_inner_it, max_substep_it, src_max_chg, &
+                                 vel_underflow, eos, kd_int, tke_int &
+#ifdef KS_COUNTERS
+                                 , it_outer, it_inner, it_arm, it_armcall, it_call &
+#endif
+                                 )
+      !! ⚠ THIS SPLIT EXISTS FOR ONE COMPILER, AND IS NUMERICALLY INERT.
+      !! The `do concurrent` body used to live directly in
+      !! `kappa_shear_column_kernel` and reference `this%…` throughout. AMD
+      !! flang's `-fdo-concurrent-to-openmp=device` pass cannot map a derived
+      !! type that has a derived-type COMPONENT:
+      !!   DoConcurrentConversion.cpp:603: not yet implemented:
+      !!   Nested record types are not supported yet.
+      !! `ocean_kappa_shear_t` has exactly one — `type(ocean_eos_t) :: eos` —
+      !! and that alone is fatal even for a loop that never reads it (the pass
+      !! rejects on the TYPE of a referenced variable, not on the reference).
+      !! So the outer routine is now a host-side shim that dereferences `this`,
+      !! and the loop sees only plain scalars, plain arrays, and the FLAT
+      !! `ocean_eos_t` — which the pass accepts. This mirrors what production's
+      !! own `kappa_shear_compute` shim (:276-294) already does for the tracer
+      !! registry. Not one arithmetic line changed; `make verify` is the gate.
+      integer, intent(in) :: nx, ny, nz
+      real(wp), intent(in) :: dt
+      type(multilayer_cgrid_state_t), intent(in) :: ms
+      real(wp), intent(in) :: hT(:, :, :)
+      real(wp), intent(in) :: hS(:, :, :)
+      real(wp), intent(in) :: f_centre(:, :)
+      real(wp), intent(in) :: lz_rescale, rho0, ri_crit, shearmix_rate
+      real(wp), intent(in) :: fri_curvature, c_n, c_s, lambda
+      real(wp), intent(in) :: kappa_0, kappa_seed, kappa_trunc, tke_bg, tol_err
+      integer, intent(in) :: max_inner_it, max_substep_it
+      real(wp), intent(in) :: src_max_chg, vel_underflow
+      type(ocean_eos_t), intent(in) :: eos
+      real(wp), intent(inout) :: kd_int(:, :, :), tke_int(:, :, :)
+#ifdef KS_COUNTERS
+      integer, intent(inout) :: it_outer(:, :), it_inner(:, :)
+      integer, intent(inout) :: it_arm(:, :), it_armcall(:, :), it_call(:, :)
+#endif
+
+      integer :: i, j, k, kg
       real(wp) :: f2_val, hk, inv_h
       real(wp) :: h_sd(NZL), u_sd(NZL), v_sd(NZL), t_sd(NZL), s_sd(NZL)
       real(wp) :: idz_s(NZL), idz_int_s(NZLI), hint_s(NZLI), il2_s(NZLI)
       real(wp) :: kappa_avg_sd(NZLI), tke_avg_sd(NZLI)
-
-      nx = grid%nx_total
-      ny = grid%ny_total
-      nz = ms%nz_ml
+#ifdef KS_COUNTERS
+      integer :: n_out_l, n_in_l, n_arm_l2, n_armc_l, n_callt_l
+#endif
 
       do concurrent(j=1:ny, i=1:nx) &
-         local(k, kg, f2_val, hk, inv_h, &
+         local(k, kg, f2_val, hk, inv_h KS_CNT_LOCALS, &
                h_sd, u_sd, v_sd, t_sd, s_sd, &
                idz_s, idz_int_s, hint_s, il2_s, &
                kappa_avg_sd, tke_avg_sd)
@@ -125,6 +227,11 @@ contains
             kappa_avg_sd(k) = 0.0_wp
             tke_avg_sd(k) = 0.0_wp
          end do
+#ifdef KS_COUNTERS
+         n_out_l = 0
+         n_in_l = 0
+         n_arm_l2 = 0; n_armc_l = 0; n_callt_l = 0
+#endif
 
          if (ms%wet_mask(i, j) > 0.0_wp) then
             ! ---- Gather with the index flip (local k=1 = surface) ----
@@ -137,7 +244,7 @@ contains
                                  ms%v_face_y_layer(i, j + 1, kg))
             end do
 
-            f2_val = this%f_centre(i, j)*this%f_centre(i, j)
+            f2_val = f_centre(i, j)*f_centre(i, j)
 
             ! ---- Gather floor at H_VANISHED, solve on nz. (Production's
             !      `else` branch — the live one; `do_merge` is always false.)
@@ -150,34 +257,45 @@ contains
                s_sd(k) = hS(i, j, kg)*inv_h
             end do
 
-            call ks_precompute(nz, this%lz_rescale, h_sd, &
+            call ks_precompute(nz, lz_rescale, h_sd, &
                                idz_s, idz_int_s, hint_s, il2_s)
 
-            call ks_solve_column(nz, dt, f2_val, this%rho0, &
-                                 this%ri_crit, this%shearmix_rate, &
-                                 this%fri_curvature, this%c_n, this%c_s, &
-                                 this%lambda, this%kappa_0, this%kappa_seed, &
-                                 this%kappa_trunc, this%tke_bg, this%tol_err, &
-                                 this%max_inner_it, this%max_substep_it, &
-                                 this%src_max_chg, this%vel_underflow, &
-                                 this%eos, &
+            call ks_solve_column(nz, dt, f2_val, rho0, &
+                                 ri_crit, shearmix_rate, &
+                                 fri_curvature, c_n, c_s, &
+                                 lambda, kappa_0, kappa_seed, &
+                                 kappa_trunc, tke_bg, tol_err, &
+                                 max_inner_it, max_substep_it, &
+                                 src_max_chg, vel_underflow, &
+                                 eos, &
                                  h_sd, u_sd, v_sd, t_sd, s_sd, &
                                  idz_s, idz_int_s, hint_s, il2_s, &
-                                 kappa_avg_sd, tke_avg_sd)
+                                 kappa_avg_sd, tke_avg_sd &
+#ifdef KS_COUNTERS
+                                 , n_out_l, n_in_l, n_arm_l2, n_armc_l, n_callt_l &
+#endif
+                                 )
          end if
 
          ! ---- Scatter with the flip; force exact 0 at bed + surface ----
          do k = 1, nz + 1
             kg = nz + 2 - k
-            this%kd_int(i, j, kg) = kappa_avg_sd(k)
-            this%tke_int(i, j, kg) = tke_avg_sd(k)
+            kd_int(i, j, kg) = kappa_avg_sd(k)
+            tke_int(i, j, kg) = tke_avg_sd(k)
          end do
-         this%kd_int(i, j, 1) = 0.0_wp
-         this%kd_int(i, j, nz + 1) = 0.0_wp
-         this%tke_int(i, j, 1) = 0.0_wp
-         this%tke_int(i, j, nz + 1) = 0.0_wp
+         kd_int(i, j, 1) = 0.0_wp
+         kd_int(i, j, nz + 1) = 0.0_wp
+         tke_int(i, j, 1) = 0.0_wp
+         tke_int(i, j, nz + 1) = 0.0_wp
+#ifdef KS_COUNTERS
+         it_outer(i, j) = n_out_l
+         it_inner(i, j) = n_in_l
+         it_arm(i, j) = n_arm_l2
+         it_armcall(i, j) = n_armc_l
+         it_call(i, j) = n_callt_l
+#endif
       end do
-   end subroutine kappa_shear_column_kernel
+   end subroutine ks_columns_dc
 
    ! =================================================================
    ! Column solve helpers — VERBATIM from production :474-1430.
@@ -399,7 +517,12 @@ contains
                                      idz_s, hint_s, il2_s, e1_s, &
                                      tke_o, kappa_o, &
                                      ksrc_sc, tkedec_sc, aq_sc, dq_sc, cq_sc, &
-                                     dk_sc, ck_sc, ild2_sc)
+                                     dk_sc, ck_sc, ild2_sc, &
+                                     dkdq_sc, dqmdk_sc, dqdz_sc &
+#ifdef KS_COUNTERS
+                                     , n_it, n_arm &
+#endif
+                                     )
       DC_ROUTINE_SEQ
       integer, intent(in) :: nz, max_inner_it
       real(wp), intent(in) :: tke_min, f2_val
@@ -414,14 +537,43 @@ contains
       real(wp), intent(inout) :: ksrc_sc(NZLI), tkedec_sc(NZLI)
       real(wp), intent(inout) :: aq_sc(NZL), dq_sc(NZLI), cq_sc(NZLI)
       real(wp), intent(inout) :: dk_sc(NZLI), ck_sc(NZLI), ild2_sc(NZLI)
+      !! Newton-only scratch (MOM_kappa_shear.F90:1546,1555,1556). DEGENERATE in
+      !! a NEWTON=0 build: these cost 768 bytes of per-thread frame at
+      !! NZSTACK=31, the frame is a measured axis here, and the CUDA kernels have
+      !! no counterpart -- carrying them by default would move every timing away
+      !! from the recorded set and skew the DC-vs-CUDA frame pairing.
+#ifdef KS_NO_NEWTON
+      real(wp), intent(inout) :: dkdq_sc(1), dqmdk_sc(1), dqdz_sc(1)
+#else
+      real(wp), intent(inout) :: dkdq_sc(NZLI), dqmdk_sc(NZLI), dqdz_sc(NZL)
+#endif
+#ifdef KS_COUNTERS
+      integer, intent(out) :: n_it
+      !! ARMING COUNTER (measurement only, no solver change). MOM6 leaves Picard
+      !! for its Newton solve once BOTH increments are everywhere below
+      !! Newton_err=0.2 of their local means (MOM_kappa_shear.F90:2004-2019).
+      !! This records the Picard sweep at which that first becomes true, or 0 if
+      !! it never does -- i.e. how much of this column's work MOM6 would have
+      !! handed to Newton. The range and the kappa half are character-for-
+      !! character the convergence test below; the TKE half is the part our
+      !! (Newton-free) convergence test does not carry.
+      integer, intent(out) :: n_arm
+#endif
 
       integer :: kk, k, k2, it
       integer :: ks_src, ke_src, ks_kap, ke_kap, ks_kp, ke_kp, ke_tke
       integer :: ks_new, ke_new, k_lo, k_hi
       real(wp) :: cqc_l, ckc_l, bqd1_l, bq_l, tsrc_l, raw_l, dnom_l
       real(wp) :: bkd1_l, bk_l, trv, tr2v, lhs_l, rhs_l
-      logical :: conv
+      real(wp) :: iq_l, ksrc_l, decay_k, decay_q, v1_l, v2_l, kmean_l, ntest_l
+      real(wp) :: newton_err
+      logical :: conv, do_newton, abort_newton, in_tol, was_newton
+      real(wp), parameter :: KS_ROUNDOFF = 1.0e-16_wp
 
+#ifdef KS_COUNTERS
+      n_it = 0
+      n_arm = 0
+#endif
       ks_src = nz + 2
       ke_src = 0
       ksrc_sc(1) = 0.0_wp
@@ -468,8 +620,26 @@ contains
       ke_kap = nz
       ks_kp = 2
       ke_kp = nz
+      !! MOM_kappa_shear.F90:1636-1638. Newton is never entered on the first
+      !! sweep -- it is armed only once both increments are small (see the
+      !! convergence block), which is what makes it a refinement of Picard
+      !! rather than a replacement for it.
+      do_newton = .false.
+      abort_newton = .false.
+#ifdef KS_NO_NEWTON
+      !! Gate is `tol_err < newton_err`, so 0 disables Newton for every column
+      !! and the solver is pure Picard -- the pre-parity behaviour, kept
+      !! reachable so it can be A/B'd and so older results stay reproducible.
+      newton_err = 0.0_wp
+#else
+      newton_err = 0.2_wp   ! MOM_kappa_shear.F90:1638
+#endif
 
       do it = 1, max_inner_it
+#ifdef KS_COUNTERS
+         n_it = n_it + 1
+#endif
+         if (.not. do_newton) then
          ! (a) TKE tridiagonal sweep.
          ke_tke = min(max(ke_kap, ke_kp) + 1, nz + 1)
          do k = 1, min(ke_tke, nz)
@@ -560,9 +730,21 @@ contains
             else if (kappa_o(kk) < tr2v) then
                kappa_o(kk) = 2.0_wp*(kappa_o(kk) - trv)
             end if
+            !! MOM6 assigns ke_kappa ONLY inside the truncation exit above, so a
+            !! sweep that never truncates LEAVES THE PREVIOUS ITERATION'S value
+            !! standing. Tracking it here instead widens the range back to nz --
+            !! which is MOM6's *Newton*-branch convention (MOM_kappa_shear.F90
+            !! :1828), used here in the Picard branch. It diverges the moment an
+            !! iteration truncates and the next does not, changing where the
+            !! K_Q/dK fix-ups land, the extent of the tail-zeroing loop, and the
+            !! start of the up-sweep. Build KERANGE=mom6 for MOM6's convention.
+#ifndef KS_KE_MOM6
             ke_new = kk
+#endif
          end do
+#ifndef KS_KE_MOM6
          if (ke_new > 0) ke_kap = ke_new
+#endif
 
          if (ke_kap >= 1 .and. tke_o(ke_kap) > 0.0_wp) then
             k_q_io(ke_kap) = kappa_o(ke_kap)/tke_o(ke_kap)
@@ -605,19 +787,207 @@ contains
             k_q_io(kk) = 0.0_wp
          end do
 
+         else
+#ifndef KS_NO_NEWTON
+            !! ================= NEWTON'S METHOD BRANCH =========================
+            !! MOM_kappa_shear.F90:1825-1971, transcribed. One block-tridiagonal
+            !! solve of the coupled (kappa, TKE) system in a single forward/back
+            !! sweep, replacing the Picard sweeps above once both increments are
+            !! small. Simplifications, both safe in this build: dz_h_Int and
+            !! dz_Int are identically 1 (Boussinesq only -- the terms
+            !! dz_Int*(N2*Ilambda2+f2) and dz_Int*(S2-N2) below would need
+            !! re-deriving otherwise), and the top and bottom TKE BCs are
+            !! FIXED-VALUE here, so MOM6's tke_noflux_*_BC `else` branches
+            !! (:1843, :1926) are the ones taken. debug_soln and
+            !! dKdQ_iteration_bug are omitted deliberately.
+            ks_kp = ks_kap; ke_kp = ke_kap; ke_kap = nz; ks_kap = 2
+            dk_sc(1) = 0.0_wp; ck_sc(2) = 0.0_wp; ckc_l = 1.0_wp; dkdq_sc(1) = 0.0_wp
+            aq_sc(1) = (0.5_wp*(kappa_o(1) + kappa_o(2)) + kappa_0)*idz_s(1)
+            dqdz_sc(1) = 0.5_wp*(tke_o(1) - tke_o(2))*idz_s(1)
+            dq_sc(1) = 0.0_wp; cq_sc(2) = 0.0_wp; cqc_l = 1.0_wp; dqmdk_sc(2) = 0.0_wp
+
+            do kk = 2, nz
+               iq_l = 1.0_wp/tke_o(kk)
+               ild2_sc(kk) = (n2_in(kk)*ilambda2 + f2_val)*iq_l + il2_s(kk)
+               ksrc_l = hint_s(kk)*(ksrc_sc(kk) - ild2_sc(kk)*kappa_o(kk)) + &
+                        idz_s(kk - 1)*(kappa_o(kk - 1) - kappa_o(kk)) - &
+                        idz_s(kk)*(kappa_o(kk) - kappa_o(kk + 1))
+
+               !! pivot must stay positive, else Newton is abandoned for this column
+               decay_k = -idz_s(kk - 1)*dqmdk_sc(kk)*dkdq_sc(kk - 1) + hint_s(kk)*ild2_sc(kk)
+               if (decay_k < 0.0_wp) then
+                  abort_newton = .true.
+                  exit
+               end if
+               bk_l = 1.0_wp/(idz_s(kk) + idz_s(kk - 1)*ckc_l + decay_k)
+               ck_sc(kk + 1) = bk_l*idz_s(kk)
+               ckc_l = bk_l*(idz_s(kk - 1)*ckc_l + decay_k)
+               dkdq_sc(kk) = bk_l*(idz_s(kk - 1)*dkdq_sc(kk - 1)*cq_sc(kk) + &
+                                   (n2_in(kk)*ilambda2 + f2_val)*iq_l**2*kappa_o(kk))
+               dk_sc(kk) = bk_l*(ksrc_l + idz_s(kk - 1)*dk_sc(kk - 1) + &
+                                 idz_s(kk - 1)*dkdq_sc(kk - 1)*dq_sc(kk - 1))
+
+               if (dk_sc(kk) <= ckc_l*(kappa_trunc - kappa_o(kk))) then
+                  dk_sc(kk) = -ckc_l*kappa_o(kk)
+               else if (dk_sc(kk) < ckc_l*(2.0_wp*kappa_trunc - kappa_o(kk))) then
+                  dk_sc(kk) = 2.0_wp*dk_sc(kk) - ckc_l*(2.0_wp*kappa_trunc - kappa_o(kk))
+               end if
+
+               aq_sc(kk) = (0.5_wp*(kappa_o(kk) + kappa_o(kk + 1)) + kappa_0)*idz_s(kk)
+               dqdz_sc(kk) = 0.5_wp*(tke_o(kk) - tke_o(kk + 1))*idz_s(kk)
+               tsrc_l = hint_s(kk)*(((kappa_o(kk) + kappa_0)*s2_in(kk) - &
+                                     kappa_o(kk)*n2_in(kk)) - &
+                                    (tke_o(kk) - tke_bg)*tkedec_sc(kk)) - &
+                        (aq_sc(kk)*(tke_o(kk) - tke_o(kk + 1)) - &
+                         aq_sc(kk - 1)*(tke_o(kk - 1) - tke_o(kk)))
+               v1_l = aq_sc(kk - 1) + dqdz_sc(kk - 1)*dkdq_sc(kk - 1)
+               v2_l = (v1_l*dqmdk_sc(kk) + dqdz_sc(kk - 1)*ck_sc(kk)) + &
+                      ((dqdz_sc(kk - 1) - dqdz_sc(kk)) + (s2_in(kk) - n2_in(kk)))
+
+               decay_q = hint_s(kk)*tkedec_sc(kk) - dqdz_sc(kk - 1)*dkdq_sc(kk - 1)*cq_sc(kk) &
+                         - v2_l*dkdq_sc(kk)
+               if (decay_q < 0.0_wp) then
+                  abort_newton = .true.
+                  exit
+               end if
+               bq_l = 1.0_wp/(aq_sc(kk) + (cqc_l*aq_sc(kk - 1) + decay_q))
+               cq_sc(kk + 1) = aq_sc(kk)*bq_l
+               cqc_l = (cqc_l*aq_sc(kk - 1) + decay_q)*bq_l
+               dqmdk_sc(kk + 1) = (v2_l*ck_sc(kk + 1) - dqdz_sc(kk))*bq_l
+               !! TKE may never fall below half its value
+               dq_sc(kk) = max(bq_l*((v1_l*dq_sc(kk - 1) + dqdz_sc(kk - 1)*dk_sc(kk - 1)) + &
+                                     (v2_l*dk_sc(kk) + tsrc_l)), cqc_l*(-0.5_wp*tke_o(kk)))
+
+               if ((it > 1) .and. (kk > ke_src) .and. (dk_sc(kk) == 0.0_wp) .and. &
+                   ((kappa_o(kk) + kappa_o(kk + 1)) == 0.0_wp)) then
+                  ke_kap = kk - 1
+                  exit
+               end if
+            end do
+
+            if ((ke_kap == nz) .and. (.not. abort_newton)) then
+               dk_sc(nz + 1) = 0.0_wp; dkdq_sc(nz + 1) = 0.0_wp
+               dq_sc(nz + 1) = 0.0_wp        ! fixed-value bottom BC
+            else if (.not. abort_newton) then
+               dq_sc(ke_kap + 1) = dq_sc(ke_kap + 1)/ &
+                                   (1.0_wp - cq_sc(ke_kap + 2)*e1_s(ke_kap + 2))
+               tke_o(ke_kap + 1) = max(tke_o(ke_kap + 1) + dq_sc(ke_kap + 1), tke_min)
+               do k = ke_kap + 2, nz + 1
+                  dk_sc(k) = 0.0_wp
+                  dq_sc(k) = max(e1_s(k)*dq_sc(k - 1), -0.5_wp*tke_o(k))
+                  tke_o(k) = max(tke_o(k) + dq_sc(k), tke_min)
+                  if (abs(dq_sc(k)) < KS_ROUNDOFF*tke_o(k)) exit
+               end do
+            end if
+
+            if (.not. abort_newton) then
+               do kk = ke_kap, 2, -1
+                  dq_sc(kk) = max(dq_sc(kk) + (cq_sc(kk + 1)*dq_sc(kk + 1) + &
+                                               dqmdk_sc(kk + 1)*dk_sc(kk + 1)), &
+                                  -0.5_wp*tke_o(kk))
+                  tke_o(kk) = max(tke_o(kk) + dq_sc(kk), tke_min)
+                  dk_sc(kk) = dk_sc(kk) + (ck_sc(kk + 1)*dk_sc(kk + 1) + dkdq_sc(kk)*dq_sc(kk))
+                  if (dk_sc(kk) <= kappa_trunc - kappa_o(kk)) then
+                     dk_sc(kk) = -kappa_o(kk)
+                     kappa_o(kk) = 0.0_wp
+                     if ((kk < ks_src) .and. (kk + 1 > ks_kap)) ks_kap = kk + 1
+                  else if (dk_sc(kk) < 2.0_wp*kappa_trunc - kappa_o(kk)) then
+                     dk_sc(kk) = 2.0_wp*dk_sc(kk) - (2.0_wp*kappa_trunc - kappa_o(kk))
+                     kappa_o(kk) = max(kappa_o(kk) + dk_sc(kk), 0.0_wp)
+                     if (kk <= ks_kap) ks_kap = 2
+                  else
+                     kappa_o(kk) = kappa_o(kk) + dk_sc(kk)
+                     if (kk <= ks_kap) ks_kap = 2
+                  end if
+               end do
+               dq_sc(1) = max(dq_sc(1) + cq_sc(2)*dq_sc(2) + dqmdk_sc(2)*dk_sc(2), &
+                              tke_min - tke_o(1))
+               tke_o(1) = max(tke_o(1) + dq_sc(1), tke_min)
+               dk_sc(1) = 0.0_wp
+            end if
+#endif
+         end if
+
          ! (c) Picard convergence test.
          k_lo = min(ks_kap, ks_kp)
          k_hi = max(ke_kap, ke_kp)
-         conv = .true.
-         do kk = k_lo, k_hi
-            lhs_l = abs(dk_sc(kk))
-            rhs_l = tol_err*(kappa_0 + kappa_o(kk) - 0.5_wp*dk_sc(kk))
-            if (lhs_l > rhs_l) then
-               conv = .false.
-               exit
-            end if
-         end do
-         if (conv) exit
+
+#ifdef KS_COUNTERS
+         !! sweeps actually executed by the Newton solver (not the Picard body)
+         !! Sweeps actually executed by the Newton solver. Zero in a default
+         !! (NEWTON=0) build, which is the point: production MOM6 measures
+         !! ~0.001-0.03% Newton sweeps at KAPPA_SHEAR_TOL_ERR=0.1, so
+         !! Picard-only IS the production behaviour.
+         if (do_newton) n_arm = n_arm + 1
+#endif
+
+         !! MOM_kappa_shear.F90:2004-2038. When Newton is still available this
+         !! ALSO decides whether to arm it: a lower tolerance switches in than
+         !! switches back (the 2x hysteresis), and both increments must be small
+         !! everywhere. An abort is sticky in effect -- Newton_err halves, so
+         !! with tol_err=0.1 the gate `tol_err < Newton_err` becomes 0.1 < 0.1
+         !! and that column finishes in Picard.
+         if ((tol_err < newton_err) .and. (.not. abort_newton)) then
+            ntest_l = newton_err
+            if (do_newton) ntest_l = 2.0_wp*newton_err
+            !! MOM6 declares was_Newton ("the value of do_Newton before checking
+            !! convergence", :1613), assigns it at :2007 and NEVER READS IT --
+            !! its two abort tests say `if (do_Newton)`, but do_Newton was just
+            !! set .true. unconditionally, so the first out-of-tolerance
+            !! interface always aborts. That halves Newton_err to 0.1 and the
+            !! gate `tol_err < Newton_err` becomes 0.1 < 0.1, closing Newton for
+            !! good. Verified: as MOM6 writes it, Newton runs ZERO times at the
+            !! default tol_err. KS_NEWTON_ASWRITTEN reproduces that; the default
+            !! uses was_newton, which is what the variable is for.
+            was_newton = do_newton
+            in_tol = .true.
+            do_newton = .true.
+            do kk = k_lo, k_hi
+               kmean_l = kappa_0 + (kappa_o(kk) - 0.5_wp*dk_sc(kk))
+               if (abs(dk_sc(kk)) > ntest_l*kmean_l) then
+#ifdef KS_NEWTON_ASWRITTEN
+                  if (do_newton) abort_newton = .true.
+#else
+                  if (was_newton) abort_newton = .true.
+#endif
+                  in_tol = .false.
+                  do_newton = .false.
+                  exit
+               else if (abs(dk_sc(kk)) > tol_err*kmean_l) then
+                  in_tol = .false.
+                  if (.not. do_newton) exit
+               end if
+               if (abs(dq_sc(kk)) > ntest_l*(tke_o(kk) - 0.5_wp*dq_sc(kk))) then
+#ifdef KS_NEWTON_ASWRITTEN
+                  if (do_newton) abort_newton = .true.
+#else
+                  if (was_newton) abort_newton = .true.
+#endif
+                  do_newton = .false.
+                  if (.not. in_tol) exit
+               end if
+            end do
+         else
+            in_tol = .true.
+            do kk = k_lo, k_hi
+               if (abs(dk_sc(kk)) > tol_err*(kappa_0 + (kappa_o(kk) - 0.5_wp*dk_sc(kk)))) then
+                  in_tol = .false.
+                  exit
+               end if
+            end do
+         end if
+
+         if (abort_newton) then
+            do_newton = .false.
+            abort_newton = .false.
+            newton_err = 0.5_wp*newton_err
+            ke_kp = nz
+            do kk = 2, nz
+               k_q_io(kk) = kappa_o(kk)/max(tke_o(kk), tke_min)
+            end do
+         end if
+
+         if (in_tol) exit
       end do
 
       kappa_o(1) = 0.0_wp
@@ -757,7 +1127,11 @@ contains
                                    eos, &
                                    h_sd, u_sd, v_sd, t_sd, s_sd, &
                                    idz_s, idz_int_s, hint_s, il2_s, &
-                                   kappa_avg_sd, tke_avg_sd)
+                                   kappa_avg_sd, tke_avg_sd &
+#ifdef KS_COUNTERS
+                                   , n_out, n_in, n_arm_tot, n_arm_call, n_call_tot &
+#endif
+                                   )
       DC_ROUTINE_SEQ
       type(ocean_eos_t), intent(in) :: eos
       integer, intent(in) :: nz, max_inner_it, max_substep_it
@@ -771,6 +1145,14 @@ contains
       real(wp), intent(in) :: idz_s(NZL), idz_int_s(NZLI)
       real(wp), intent(in) :: hint_s(NZLI), il2_s(NZLI)
       real(wp), intent(out) :: kappa_avg_sd(NZLI), tke_avg_sd(NZLI)
+#ifdef KS_COUNTERS
+      integer, intent(out) :: n_out, n_in
+      !! n_arm_tot  : Picard sweeps that MOM6 would have run as NEWTON sweeps
+      !! n_arm_call : find_kappa_tke calls that reached the arming condition
+      !! n_call_tot : find_kappa_tke calls made (the denominator)
+      integer, intent(out) :: n_arm_tot, n_arm_call, n_call_tot
+      integer :: n_it_l, n_arm_l
+#endif
 
       ! Per-thread work arrays (fixed size, surface-down).
       real(wp) :: u_c(NZL), v_c(NZL), t_c(NZL), s_c(NZL)
@@ -781,6 +1163,12 @@ contains
       real(wp) :: ksrc(NZLI), tkedec(NZLI)
       real(wp) :: aq(NZL), dq(NZLI), cq(NZLI)
       real(wp) :: dk(NZLI), ck(NZLI), ild2(NZLI)
+      !! Newton scratch; degenerate when the solver is compiled out (see above).
+#ifdef KS_NO_NEWTON
+      real(wp) :: dkdq(1), dqmdk(1), dqdz(1)
+#else
+      real(wp) :: dkdq(NZLI), dqmdk(NZLI), dqdz(NZL)
+#endif
       real(wp) :: cqsav(NZLI)
       real(wp) :: u_ps(NZL), v_ps(NZL), t_ps(NZL), s_ps(NZL), c1_ps(NZLI)
       real(wp) :: n2p(NZLI), s2p(NZLI), n2c(NZLI), s2c(NZLI)
@@ -799,6 +1187,15 @@ contains
       integer :: ks_ps, ke_ps, ks_mid, ke_mid
       logical :: no_mixing
 
+#ifdef KS_COUNTERS
+      n_out = 0
+      n_in = 0
+      n_arm_tot = 0
+      n_arm_call = 0
+      n_call_tot = 0
+      n_it_l = 0
+      n_arm_l = 0
+#endif
       k0dt = dt*kappa_0
       tke_min = max(tke_bg, 1.0e-20_wp)
       c_n2 = c_n*c_n
@@ -916,6 +1313,9 @@ contains
 
       ! ---- Adaptive outer substepping ----
       do io = 1, max_substep_it
+#ifdef KS_COUNTERS
+         n_out = n_out + 1
+#endif
          ! Step 1: K_src + seed TKE from previous kappa/K_Q.
          ks_src = nz + 2
          ke_src = 0
@@ -983,7 +1383,18 @@ contains
                                    tol_err, max_inner_it, n2, s2, kappa, &
                                    kq_tmp, idz_s, hint_s, il2_s, e1, tke, &
                                    kappa_out, ksrc, tkedec, aq, dq, cq, dk, &
-                                   ck, ild2)
+                                   ck, ild2, dkdq, dqmdk, dqdz &
+#ifdef KS_COUNTERS
+                                   , n_it_l, n_arm_l &
+#endif
+                                   )
+#ifdef KS_COUNTERS
+            n_in = n_in + n_it_l
+            !! sweeps MOM6 would have run under Newton rather than Picard
+            n_arm_tot = n_arm_tot + n_arm_l
+            if (n_arm_l > 0) n_arm_call = n_arm_call + 1
+            n_call_tot = n_call_tot + 1
+#endif
             do kk = 1, nz + 1
                k_q(kk) = kq_tmp(kk)
             end do
@@ -1061,7 +1472,18 @@ contains
                                    tol_err, max_inner_it, n2p, s2p, kappa_out, &
                                    kq_tmp, idz_s, hint_s, il2_s, e1, tke_pred, &
                                    kappa_pred, ksrc, tkedec, aq, dq, cq, dk, &
-                                   ck, ild2)
+                                   ck, ild2, dkdq, dqmdk, dqdz &
+#ifdef KS_COUNTERS
+                                   , n_it_l, n_arm_l &
+#endif
+                                   )
+#ifdef KS_COUNTERS
+            n_in = n_in + n_it_l
+            !! sweeps MOM6 would have run under Newton rather than Picard
+            n_arm_tot = n_arm_tot + n_arm_l
+            if (n_arm_l > 0) n_arm_call = n_arm_call + 1
+            n_call_tot = n_call_tot + 1
+#endif
             do kk = 1, nz + 1
                kappa_mid(kk) = 0.5_wp*(kappa_out(kk) + kappa_pred(kk))
             end do
@@ -1087,7 +1509,18 @@ contains
                                    tol_err, max_inner_it, n2c, s2c, kappa_out, &
                                    k_q, idz_s, hint_s, il2_s, e1, tke_fin, &
                                    kappa_pred2, ksrc, tkedec, aq, dq, cq, dk, &
-                                   ck, ild2)
+                                   ck, ild2, dkdq, dqmdk, dqdz &
+#ifdef KS_COUNTERS
+                                   , n_it_l, n_arm_l &
+#endif
+                                   )
+#ifdef KS_COUNTERS
+            n_in = n_in + n_it_l
+            !! sweeps MOM6 would have run under Newton rather than Picard
+            n_arm_tot = n_arm_tot + n_arm_l
+            if (n_arm_l > 0) n_arm_call = n_arm_call + 1
+            n_call_tot = n_call_tot + 1
+#endif
             dt_rem = dt_rem - dt_now
             do kk = 1, nz + 1
                kappa_avg(kk) = kappa_avg(kk) + &

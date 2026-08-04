@@ -1,0 +1,2 @@
+kernel,mode,compiler,compiler_ver,flags,threads,device,nx,ny,nz,reps,warm,ms_per_step,git_hash,host,timestamp
+continuity_layered,dc_gpu_omp,/home/jorge/install/nvhpc/26.5//Linux_x86_64/26.5/compilers/bin/nvfortran,"","-Mfree -Mbackslash -O3 -fast -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA -stdpar=gpu -mp=gpu -gpu=cc70,mem:separate -gpu=tripcount:host -DDC_DATA_OMP",1,"Tesla V100-DGXS-32GB",160,100,30,50,10,0.3253,7ea6c27,Big-Chungus,20260724_022654

@@ -123,4 +123,27 @@ ideal_benchmark/build_cpu/
 ideal_benchmark/*.f64
 
 # paper-run CSV outputs (build_and_run_*.sh); commit specific finals by hand if wanted
-paper_data/
+# paper_data/ IS tracked: 44 small CSVs, ~450 KB, and they are the evidence
+# behind every number in NOTES_ON_PERF.md. Read them through tools/ks_collect.py,
+# which encodes the filters that separate a result from an artifact (see its
+# docstring -- naive aggregation of these files produces plausible wrong numbers).
+
+# ---- kappa_shear sweep build products --------------------------------------
+# tools/ks_sweep.sh gives every compile-time configuration its own binary and
+# build dir (NZSTACK / VARIANT / VLEN / BCOPY / CNT / TRIPCOUNT / OPT_NZMAX), so
+# the exact-name entries above cannot cover them.
+*/dc_acc-*
+*/dc_omp-*
+*/dc_none-*
+*/sdo-*
+*/cmp_acc*
+kappa_shear/*.bin
+kappa_shear/*.nsys-rep
+kappa_shear/*.sqlite
+kappa_shear/.ks_sweep_*.log
+kappa_shear/.ks_min_*.log
+
+# figures/ IS tracked (regenerate with tools/ks_plot.py after new data lands)
+
+# local handoff note -- names the (not yet public) model repo; keep out of git
+kappa_shear_comment.md

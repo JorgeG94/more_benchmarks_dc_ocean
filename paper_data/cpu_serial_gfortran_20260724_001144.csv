@@ -1,0 +1,10 @@
+kernel,compiler,nx,ny,nz,ms_per_step
+continuity_layered,gfortran,160,100,30,21.4813
+redi,gfortran,160,100,30,744.2990
+kappa_shear,gfortran,160,100,30,277.6861
+ale_remap,gfortran,160,100,30,96.1752
+btstep,gfortran,160,100,30,25.8310
+epbl,gfortran,160,100,30,148.1579
+meke,gfortran,160,100,30,2.0020
+hvisc,gfortran,160,100,30,9.2360
+hll_fluxes,gfortran,160,100,30,2.7008

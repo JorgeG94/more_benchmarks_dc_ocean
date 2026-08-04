@@ -1,0 +1,1 @@
+experiment,mode,impl,launcher,variant,lanes,compiler,compiler_ver,flags,stack_policy,copy_policy,nzstack,bcopy,opt_nzmax,minblocks,threads,proc_bind,device,gpu_arch,nxp,nyp,nx,ny,ncols,nwet,nz,land_pct,reps,warm,nrun,ms_min,ms_med,ns_per_col,it_outer,it_inner,kd_sum,kd_min,kd_max,regs,local_b,status,git_hash,host,timestamp

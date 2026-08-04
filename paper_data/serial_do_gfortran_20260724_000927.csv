@@ -1,0 +1,10 @@
+kernel,mode,compiler,compiler_version,flags,threads,nx,ny,nz,reps,warm,ms_per_step,git_hash,host,timestamp
+continuity_layered,serial_do,gfortran,"GNU Fortran (GCC) 15.1.0","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,29.5315,7ea6c27,Big-Chungus,20260724_000927
+redi,serial_do,gfortran,"GNU Fortran (GCC) 15.1.0","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,736.2813,7ea6c27,Big-Chungus,20260724_000927
+kappa_shear,serial_do,gfortran,"GNU Fortran (GCC) 15.1.0","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,259.0649,7ea6c27,Big-Chungus,20260724_000927
+ale_remap,serial_do,gfortran,"GNU Fortran (GCC) 15.1.0","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,72.7419,7ea6c27,Big-Chungus,20260724_000927
+btstep,serial_do,gfortran,"GNU Fortran (GCC) 15.1.0","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,22.1480,7ea6c27,Big-Chungus,20260724_000927
+epbl,serial_do,gfortran,"GNU Fortran (GCC) 15.1.0","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,108.4552,7ea6c27,Big-Chungus,20260724_000927
+meke,serial_do,gfortran,"GNU Fortran (GCC) 15.1.0","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,2.4050,7ea6c27,Big-Chungus,20260724_000927
+hvisc,serial_do,gfortran,"GNU Fortran (GCC) 15.1.0","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,13.0300,7ea6c27,Big-Chungus,20260724_000927
+hll_fluxes,serial_do,gfortran,"GNU Fortran (GCC) 15.1.0","-O3 -I../common -DMODEL_NZ_STACK_MAX=128 -DWITH_CUDA          ",1,160,100,30,50,10,2.9624,7ea6c27,Big-Chungus,20260724_000927

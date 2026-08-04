@@ -94,16 +94,45 @@ struct KsPar {
    double eos_rho0, eos_alpha_T, eos_beta_S;
 };
 
-extern "C" void ks_cuda_launch(const double *h_layer, const double *u_face,
-                               const double *v_face, const double *hT,
-                               const double *hS, const double *wet_mask,
-                               const double *f_centre, double *kd_int,
-                               double *tke_int, int *n_out_a, int *n_in_a,
-                               int nx, int ny, int nz, const KsPar *pin,
-                               int sync);
+// KERNEL UNDER TEST. Default is the faithful port in ks_kernel.cu; building
+// with -DKS_USE_OPT (make cpp CUVARIANT=opt) links opt_kernel.cu instead --
+// same signature, same 1-based contract, so nothing below changes. The two
+// launchers deliberately have distinct names so a mislink is a link error
+// rather than a silently-wrong measurement.
+//
+// ⚠ BOTH CUDA kernels bound the `kappa_out = kappa` copy to 1..nz+1
+// (ks_kernel.cu:798). The Fortran copies the DECLARED extent unless built with
+// BCOPY=1. Compare cuda_* against DC BCOPY=1 for like-for-like; the BCOPY=0
+// rows measure that copy, they do not measure codegen.
+// bcopy=N in the RESULT line means "this build does the SAME copy work as a
+// Fortran build with BCOPY=N", so the CSV shows at a glance whether a
+// DC-vs-CUDA row pair is matched. cuda_opt always bounds the copy.
+#if defined(KS_USE_OPT) || !defined(KS_FULL_COPY)
+#define KS_BCOPY_EQUIV 1
+#else
+#define KS_BCOPY_EQUIV 0
+#endif
 
-extern "C" void ks_cuda_attrs(int *nregs, int *local_bytes, int *shared_bytes,
-                              int *max_tpb);
+#ifdef KS_USE_OPT
+#define KS_CUVARIANT "cuda_opt"
+#define ks_kernel_launch ks_opt_launch
+#define ks_kernel_attrs  ks_opt_attrs
+#else
+#define KS_CUVARIANT "cuda_faithful"
+#define ks_kernel_launch ks_cuda_launch
+#define ks_kernel_attrs  ks_cuda_attrs
+#endif
+
+extern "C" void ks_kernel_launch(const double *h_layer, const double *u_face,
+                                 const double *v_face, const double *hT,
+                                 const double *hS, const double *wet_mask,
+                                 const double *f_centre, double *kd_int,
+                                 double *tke_int, int *n_out_a, int *n_in_a,
+                                 int nx, int ny, int nz, const KsPar *pin,
+                                 int sync);
+
+extern "C" void ks_kernel_attrs(int *nregs, int *local_bytes, int *shared_bytes,
+                                int *max_tpb);
 
 // From ks_bench.F90. DT_THERM is not a knob: dt sets how many adaptive
 // substeps the outer loop needs, so changing it changes the problem.
@@ -437,7 +466,7 @@ int main(int argc, char **argv) {
    const int nxp = iarg(argc, argv, 1, NXP_DEF);
    const int nyp = iarg(argc, argv, 2, NYP_DEF);
    const int nz = iarg(argc, argv, 3, NZ_DEF);
-   const int n_reps = iarg(argc, argv, 4, REPS_DEF);
+   int n_reps = iarg(argc, argv, 4, REPS_DEF);   // <= 0 -> auto (see below)
    const int n_warm = iarg(argc, argv, 5, WARM_DEF);
    const int cu_sync = iarg(argc, argv, 6, 1);
    const int land_pct = iarg(argc, argv, 7, 0);
@@ -574,12 +603,38 @@ int main(int argc, char **argv) {
    CUDA_OK(cudaMemset(d_nin, 0, ncol * sizeof(int)));
 
    auto launch = [&](int sy) {
-      ks_cuda_launch(d_h, d_u, d_v, d_hT, d_hS, d_wet, d_fc, d_kd, d_tke,
-                     d_nout, d_nin, nx, ny, nz, &p, sy);
+      ks_kernel_launch(d_h, d_u, d_v, d_hT, d_hS, d_wet, d_fc, d_kd, d_tke,
+                       d_nout, d_nin, nx, ny, nz, &p, sy);
    };
 
    for (int rep = 0; rep < n_warm; ++rep) launch(1);
    CUDA_OK(cudaDeviceSynchronize());
+
+   // Auto rep count (nreps <= 0), matching dc_main.F90: one timed probe launch
+   // sizes the timed loop to ~KS_TARGET_MS. An nz sweep spans ~2 orders of
+   // magnitude in cost/rep, so a fixed count either burns an hour at the deep
+   // end or measures clock noise at the shallow end.
+   double target_ms = 1000.0;
+   if (const char *e = std::getenv("KS_TARGET_MS")) {
+      const double v = std::atof(e);
+      if (v > 0.0) target_ms = v;
+   }
+   // Ceiling on the auto rep count -- rep-to-rep spread is small here, so past
+   // ~50-100 reps you buy decimal places nobody reads, once per sweep config.
+   int max_reps = 100;
+   if (const char *e = std::getenv("KS_MAX_REPS")) {
+      const int v = std::atoi(e);
+      if (v > 0) max_reps = v;
+   }
+   if (n_reps <= 0) {
+      const double a = wall_s();
+      launch(1);
+      const double ms_probe = (wall_s() - a) * 1000.0;
+      n_reps = (ms_probe <= 0.0) ? max_reps
+                                 : std::max(3, std::min(max_reps, (int)(target_ms / ms_probe) + 1));
+      std::printf("  auto-reps: probe %10.4f ms/rep -> reps = %d (target %.1f ms, cap %d)\n",
+                  ms_probe, n_reps, target_ms, max_reps);
+   }
 
    // ks_bench times (n_reps launches at cuda_sync) + (1 forced-sync launch) and
    // divides by n_reps+1. Reproduced exactly, so `mean` is comparable to its
@@ -623,10 +678,10 @@ int main(int argc, char **argv) {
    std::printf("         sibling jobs have been seen to move this by 4x.\n");
 
    int nregs, lmem, smem, maxtpb;
-   ks_cuda_attrs(&nregs, &lmem, &smem, &maxtpb);
+   ks_kernel_attrs(&nregs, &lmem, &smem, &maxtpb);
    std::printf("\n  --- kernel resources (cudaFuncGetAttributes, authoritative) ---\n");
-   std::printf("  faithful : regs=%5d  local=%8d B/thread  shared=%7d B  maxTPB=%5d\n",
-               nregs, lmem, smem, maxtpb);
+   std::printf("  %-8s : regs=%5d  local=%8d B/thread  shared=%7d B  maxTPB=%5d\n",
+               KS_CUVARIANT, nregs, lmem, smem, maxtpb);
    std::printf("    (identical to ks_bench's line -- same kernel object. If these\n");
    std::printf("     ever differ, the two binaries are not linking the same code.)\n");
 
@@ -634,11 +689,12 @@ int main(int argc, char **argv) {
    // future state change makes the substepper engage, this line moves and the
    // "reproduces the median, not the variance" caveat needs revisiting.
    long h_out[16] = {0};
-   long nactive = 0, in_tot = 0;
+   long nactive = 0, in_tot = 0, out_tot = 0;
    int in_mx = 0, in_mn = 1 << 30;
    for (size_t m = 0; m < ncol; ++m) {
       h_out[std::min(nout[m], 15)]++;
       if (nin[m] > 0) nactive++;
+      out_tot += nout[m];
       in_tot += nin[m];
       in_mx = std::max(in_mx, nin[m]);
       in_mn = std::min(in_mn, nin[m]);
@@ -732,6 +788,26 @@ int main(int argc, char **argv) {
       std::printf("  and permuted errors.\n");
    }
    std::printf("%s\n", std::string(74, '=').c_str());
+
+   // ---- the ONE machine-readable line tools/ks_sweep.sh parses -------------
+   // Same key=value contract as dc_main.F90's RESULT line, so DC and CUDA rows
+   // land in one table. `ms` is the SAME statistic on both sides (total/reps).
+   // The counters are always on in this driver (the CUDA kernel writes n_out /
+   // n_in unconditionally), hence counters=1.
+   std::printf("RESULT kernel=kappa_shear variant=%s lanes=1 data=cuda"
+               " nzstack=%d bcopy=%d counters=1"
+               " nxp=%d nyp=%d nx=%d ny=%d ncols=%zu nwet=%ld nz=%d"
+               " reps=%d warm=%d land_pct=%d"
+               " ms=%.10E ns_per_col=%.10E"
+               " ms_min=%.10E ms_med=%.10E ms_max=%.10E"
+               " kd_sum=%.10E kd_min=%.10E kd_max=%.10E"
+               " it_outer=%ld it_inner=%ld regs=%d local_b=%d\n",
+               KS_CUVARIANT, MODEL_NZ_STACK_MAX, KS_BCOPY_EQUIV, nxp, nyp, nx, ny, ncol, nwet, nz,
+               n_reps, n_warm, land_pct,
+               ms_mean, ms_mean * 1.0e6 / (double)ncol,
+               ms_min, ms_med, ms_max,
+               kd_sum, kd_min, kd_max,
+               out_tot, in_tot, nregs, lmem);
 
    cudaFree(d_h); cudaFree(d_u); cudaFree(d_v); cudaFree(d_hT); cudaFree(d_hS);
    cudaFree(d_wet); cudaFree(d_fc); cudaFree(d_kd); cudaFree(d_tke);

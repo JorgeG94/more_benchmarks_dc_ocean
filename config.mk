@@ -16,8 +16,22 @@
 # NOTE: keep these as bare `VAR ?= value` with NO trailing inline comment — the
 # spaces before a `#` land INSIDE the value and break `-gpu=$(ARCH),mem:separate`.
 FC       ?= nvfortran
-# nvfortran -gpu=<arch>: V100=cc70, A100=cc80, H200=cc90
-GPU_ARCH ?= cc70
+
+# ---- GPU ARCHITECTURE: DETECTED, NOT ASSUMED -------------------------------
+# This used to be a hardcoded `cc70`, which was a foot-gun the moment these
+# benchmarks left the V100 box: on any other card the entire sweep compiles for
+# Volta and runs through JIT/compat, and every DC-vs-CUDA ratio in the resulting
+# table is measuring the wrong target. Detect from the driver instead.
+#
+#   nvidia-smi --query-gpu=compute_cap  ->  "9.0"  ->  cc90 / sm_90
+#
+# Assigned with `=` (lazy) on purpose: it is only expanded if nothing overrides
+# it, so `make ARCH=cc90 NVARCH=sm_90` and tools/ks_sweep.sh (which detects once
+# and passes both) never pay for an nvidia-smi call per make invocation.
+GPU_CC    = $(shell command -v nvidia-smi >/dev/null 2>&1 && \
+              nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null \
+              | head -1 | tr -d ' .')
+GPU_ARCH  = $(if $(strip $(GPU_CC)),cc$(strip $(GPU_CC)),cc70)
 # the benchmarks spell it ARCH; keep the two in sync
 ARCH     ?= $(GPU_ARCH)
 # -DMODEL_NZ_STACK_MAX; production build uses 128
@@ -31,6 +45,11 @@ STACK    ?= $(NZSTACK)
 # is nvfortran-only; DATA=none is the portable CPU build and works with any
 # compiler that supports F2018 `do concurrent ... local(...)` -- nvfortran,
 # gfortran >= 12, or ifx >= 2023. Keyed on FC; override on the CLI too.
+# Every name LLVM flang ships as: plain `flang`, the transitional `flang-new`,
+# and AMD's `amdflang` / `amdflang-new`. Kept in ONE place so the host-flag,
+# GPU-flag and MODFLAG rules cannot drift apart.
+FLANG_FAMILY := flang flang-new amdflang amdflang-new
+
 # MODFLAG: how the compiler is told where to WRITE .mod files. Spelled as a
 # space-separated flag so the kernel Makefiles use `$(MODFLAG) <dir>` uniformly:
 #   nvfortran / ifx -> -module <dir>;  gfortran -> -J <dir>;  flang -> -module-dir.
@@ -39,8 +58,16 @@ ifeq ($(notdir $(FC)),nvfortran)
   # DATA=none: run do concurrent across CPU cores
   DC_HOST_FLAGS ?= -stdpar=multicore
   MODFLAG       ?= -module
-else ifeq ($(notdir $(FC)),gfortran)
+else ifneq ($(filter gfortran%,$(notdir $(FC))),)
+  # Prefix match, not `ifeq ...,gfortran`: Homebrew and MacPorts install the
+  # binary VERSIONED -- `gfortran-15`, `gfortran-mp-15` -- and an exact test drops
+  # those into the unknown-compiler branch below. That branch happens to be right
+  # for gfortran today, so the bug would only surface the day the two diverge.
+  # (`local()` locality specs need gfortran >= 15; older ones build serialdo only.)
   FFLAGS_BASE   ?= -O3
+  # No DC_HOST_FLAGS: gfortran does not map `do concurrent` onto threads, so
+  # dc_multicore would be dc_serial wearing a different label. Leave it empty --
+  # the serial lane is the honest one for this compiler.
   DC_HOST_FLAGS ?=
   MODFLAG       ?= -J
 else ifeq ($(notdir $(FC)),ifx)
@@ -48,15 +75,11 @@ else ifeq ($(notdir $(FC)),ifx)
   # DATA=none default: do concurrent across CPU cores (Intel maps DC under -qopenmp)
   DC_HOST_FLAGS ?= -qopenmp
   MODFLAG       ?= -module
-else ifeq ($(notdir $(FC)),amdflang)
-  FFLAGS_BASE   ?= -O3
-  DC_HOST_FLAGS ?= -fopenmp -fdo-concurrent-to-openmp=host
-  MODFLAG       ?= -module-dir
-else ifeq ($(notdir $(FC)),flang)
-  FFLAGS_BASE   ?= -O3
-  DC_HOST_FLAGS ?= -fopenmp -fdo-concurrent-to-openmp=host
-  MODFLAG       ?= -module-dir
-else ifeq ($(notdir $(FC)),flang-new)
+else ifneq ($(filter $(notdir $(FC)),$(FLANG_FAMILY)),)
+  # LLVM flang under every name it ships as. Listing these individually invited
+  # a silent fall-through: `amdflang-new` (newer ROCm) hit the unknown-compiler
+  # default and got MODFLAG=-J, no host flag and no GPU flag -- i.e. a
+  # serial-only lane and an empty AMD column, for the wrong reason.
   FFLAGS_BASE   ?= -O3
   DC_HOST_FLAGS ?= -fopenmp -fdo-concurrent-to-openmp=host
   MODFLAG       ?= -module-dir
@@ -74,10 +97,20 @@ endif
 # only the compile flags differ. STRUCTURAL for Intel/AMD GPUs: validated where
 # such a device + toolchain exists (none on this dev node), mirroring the
 # BACKEND=hip seam below. Override the AMD arch as needed.
-AMD_GPU_ARCH ?= gfx90a
+# AMD arch: DETECTED, not assumed -- same foot-gun as the NVIDIA one above.
+# gfx90a is MI210/MI250; an MI300 is gfx942 and would silently get the wrong
+# target. Lazy `=` so an override (or a non-AMD box) never pays for rocminfo.
+AMD_GPU_CC   = $(shell command -v rocminfo >/dev/null 2>&1 && \
+                 rocminfo 2>/dev/null | grep -oE 'gfx[0-9a-f]+' | head -1)
+AMD_GPU_ARCH = $(if $(strip $(AMD_GPU_CC)),$(strip $(AMD_GPU_CC)),gfx90a)
+
+# LLVM flang and AMD's amdflang are the same driver for this purpose -- both
+# take `-fdo-concurrent-to-openmp=device`. Listing only `amdflang` meant a site
+# using the plain `flang` module got NO GPU lane at all and the AMD column came
+# back empty for the wrong reason.
 ifeq ($(notdir $(FC)),ifx)
   DC_GPU_FLAGS ?= -qopenmp -fopenmp-targets=spir64 -fopenmp-target-do-concurrent -DDC_DATA_OMP
-else ifeq ($(notdir $(FC)),amdflang)
+else ifneq ($(filter $(notdir $(FC)),$(FLANG_FAMILY)),)
   DC_GPU_FLAGS ?= -fopenmp --offload-arch=$(AMD_GPU_ARCH) -fdo-concurrent-to-openmp=device -DDC_DATA_OMP
 else
   DC_GPU_FLAGS ?=
@@ -88,8 +121,10 @@ BACKEND  ?= cuda
 
 ifeq ($(BACKEND),cuda)
   GPUCC        ?= nvcc
-  # nvcc -arch: V100=sm_70, A100=sm_80, H200=sm_90
-  NVARCH       ?= sm_70
+  # nvcc -arch, detected the same way as GPU_ARCH above (V100=sm_70, A100=sm_80,
+  # H100/GH200=sm_90, B200=sm_100). Falls back to sm_70 only if no driver is
+  # queryable -- which on a GPU box means something is wrong, not that it is a V100.
+  NVARCH       ?= $(if $(strip $(GPU_CC)),sm_$(strip $(GPU_CC)),sm_70)
   GPU_ARCHFLAG ?= -arch=$(NVARCH)
 
 else ifeq ($(BACKEND),hip)
