@@ -27,6 +27,7 @@ DESIGN NOTES, so the next edit does not undo them:
 """
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -168,12 +169,19 @@ def build(D, T, dark):
     ax.fill_between(nz, 0, 1, color=T["ink3"], alpha=0.05, zorder=0)
     ax.set_ylim(0.4, 1.5)
     finish(ax, T, "Is the GPU worth it?",
-           "each GPU against the CPU in the same node, same compiler, same source", "nz",
-           "GPU speedup vs same-node CPU", nz)
+           "one GCD / one tile vs the whole same-node CPU\n"
+           "the CPU grid is smaller and cache-resident, favouring the CPU by ~10\u201318%",
+           "nz", "GPU speedup vs same-node CPU", nz)
     ax.annotate("GPU loses", (nz[0], 0.99), xytext=(6, -13), textcoords="offset points",
                 ha="left", fontsize=9, color=T["ink3"], style="italic")
     label_ends(ax, T, nz, se)
-    ax.legend(["MI250X (1 GCD) / EPYC 7A53, 56 threads",
+    # PAIR HANDLES TO LABELS EXPLICITLY. `ax.legend([str, str])` assigns labels to
+    # artists in DRAW order, and the baseline axhline is drawn first -- so it
+    # silently took the first string and every series label shifted by one. The
+    # green line ended up direct-labelled MI250X and legended "Intel Max".
+    hs = {l.get_label(): l for l in ax.get_lines()}
+    ax.legend([hs["MI250X"], hs["Intel Max"]],
+              ["MI250X (1 GCD) / EPYC 7A53, 56 threads",
                "Intel Max (1 tile) / Xeon Max, 104 threads"], loc="lower left", ncols=1)
     figs["fig1_gpu_vs_cpu"] = f
 
@@ -204,18 +212,32 @@ def build(D, T, dark):
            "NZ_STACK_MAX=128 (production) ÷ fitted to nz+1 — identical work, identical answers",
            "nz", "cost ratio, production ÷ fitted", nz)
     label_ends(ax, T, nz, se, only={"MI250X"})
-    ax.annotate("V100, GH200 and Intel Max sit on 1.0", (nz[3], 1.0),
-                textcoords="offset points", xytext=(0, -22), ha="center",
+    # ABOVE the baseline, not below it: at (0, -22) this note landed on the x
+    # tick labels and across the three lines it is describing.
+    ax.annotate("V100, GH200 and Intel Max sit on 1.0", (nz[-1], 1.0),
+                textcoords="offset points", xytext=(-4, 34), ha="right",
                 fontsize=9, color=T["ink3"], style="italic")
     ax.legend(loc="upper right", ncols=2)
     figs["fig3_frame"] = f
 
     # 4 — DC costs nothing on CPU; emphasis on the flang family
     f, ax = plt.subplots(figsize=(7.6, 4.3))
-    order = ["flang 22.1.5", "amdflang 23.0.0", "nvfortran", "ifx 2026.0.0",
-             "ifx 2025.3.2", "gfortran 16.1.0"]
+    # The order is hand-set (the two flang-family lines carry the emphasis), so
+    # it must be RECONCILED against the data rather than intersected with it.
+    # `if k in D[...]` silently drops any series the list has not been told
+    # about -- which is how a whole machine can be measured, committed, and then
+    # simply not appear on the chart that is supposed to survey every machine.
+    order = ["Broadwell / flang 22.1.5", "EPYC 7A53 / amdflang 23.0.0",
+             "Broadwell / nvfortran", "Broadwell / ifx 2026.0.0",
+             "Xeon Max / ifx 2025.3.2", "Broadwell / gfortran 16.1.0",
+             "Mac / gfortran 15.2.0", "Grace / nvfortran 26.3"]
+    missing = [k for k in order if k not in D["dc_cost"]]
+    unlisted = [k for k in D["dc_cost"] if k not in order]
+    if missing or unlisted:
+        raise SystemExit(f"fig4 dc_cost series mismatch:\n  in `order`, absent from the data: "
+                         f"{missing}\n  measured, absent from `order`: {unlisted}")
     se = [(k, D["dc_cost"][k], S[1] if i == 0 else S[2] if i == 1 else T["ctx"], i >= 2)
-          for i, k in enumerate(order) if k in D["dc_cost"]]
+          for i, k in enumerate(order)]
     plot_lines(ax, T, nz, se, baseline=1.0)
     ax.set_ylim(0.94, 1.22)
     finish(ax, T, "do concurrent itself is free — the offload lowering is not",
@@ -232,7 +254,11 @@ def build(D, T, dark):
     # are context grey -- which is also the honest reading: the machines differ,
     # the compilers on a given machine barely do.
     f, ax = plt.subplots(figsize=(7.6, 4.3))
-    PICK = {"Xeon Max / ifx": (S[3], False),
+    # FOUR colours -- the palette's full validated set, no cycling. Grace earns
+    # one: 72 cores at 90% parallel efficiency is the finding on this panel, and
+    # drawing it in context grey would bury it among the three Broadwell lines.
+    PICK = {"Grace / nvfortran": (S[1], False),
+            "Xeon Max / ifx": (S[3], False),
             "EPYC 7A53 / amdflang": (S[2], False),
             "Broadwell / ifx": (S[0], False)}
     xs = sorted({t for k in D["threads"] for t, _ in D["threads"][k]})
@@ -243,13 +269,70 @@ def build(D, T, dark):
         se.append((k, [m.get(t) for t in xs], col, ctx))
     plot_lines(ax, T, xs, se)
     ax.set_ylim(0, None)
-    ticks = [1, 2, 4, 8, 16, 32, 56, 104]
+    ticks = [1, 2, 4, 8, 16, 32, 72, 104]
     finish(ax, T, "The CPU lanes scale",
            "same source, three threading mechanisms; speedup vs each machine's own 1 thread, nz=30",
            "threads", "speedup vs 1 thread", ticks, logx=True)
     label_ends(ax, T, xs, se)
     ax.legend(loc="upper left", ncols=1, fontsize=8.5)
     figs["fig5_threads"] = f
+
+    # 6 - the only same-grid, whole-device-vs-whole-socket comparison in the set.
+    # Separate panel, not a third line on fig1: fig1's unit is one GCD / one tile
+    # against an entire CPU, and overlaying a whole-GPU ratio would invite the
+    # reader to compare numbers that are not the same measurement.
+    f, ax = plt.subplots(figsize=(7.6, 4.3))
+    se = [("do concurrent", D["node_gh200"], S[1], False),
+          ("hand CUDA", D["node_gh200_cuda"], S[0], False)]
+    plot_lines(ax, T, nz, se, baseline=1.0)
+    ax.set_ylim(0, None)
+    finish(ax, T, "One GH200: the Hopper GPU against the whole Grace socket",
+           "both sides at production 473\u00d7297, nvfortran, frame at NZ_STACK_MAX=128",
+           "nz", "GPU speedup vs 72 Grace cores", nz)
+    label_ends(ax, T, nz, se)
+    ax.legend(loc="upper right", ncols=1)
+    figs["fig6_node"] = f
+
+    # 7 - performance portability: ONE source, every target it ran on.
+    # A bar chart, not lines: this is a magnitude comparison across ~5 named
+    # things at one depth, which is exactly what bars are for. Depth is nz=50, a
+    # real ocean-model layer count and the middle of the swept range.
+    # Colour encodes the one distinction that carries the finding -- accelerator
+    # vs CPU socket -- and NOT device identity, which the axis labels already
+    # give. Five categorical hues here would be decoration.
+    f, ax = plt.subplots(figsize=(7.6, 4.0))
+    j = nz.index(50)
+    bars = sorted(((v[j], k) for k, v in D["portability"].items() if v[j]))
+    ys = range(len(bars))
+    cols = [S[1] if D["portability_is_cpu"][k] else S[0] for _, k in bars]
+    ax.barh(list(ys), [v for v, _ in bars], height=0.52, color=cols, zorder=3)
+    ax.set_yticks(list(ys))
+    ax.set_yticklabels([k for _, k in bars], fontsize=10)
+    ax.invert_yaxis()                       # fastest at the top
+    top = max(v for v, _ in bars)
+    ax.set_xlim(0, top * 1.20)
+    for y, (v, _) in zip(ys, bars):         # direct value labels, in ink
+        ax.annotate(f"{v:,.0f}", (v, y), xytext=(7, 0), textcoords="offset points",
+                    va="center", ha="left", fontsize=9.5, color=T["ink"],
+                    fontweight="600")
+    ax.grid(axis="y", visible=False)
+    # Round tick values, not top/4: an axis reading 0, 161, 322, 483 makes the
+    # reader do arithmetic to place a bar, which is the axis's job.
+    step = 10 ** int(math.floor(math.log10(top / 4)))
+    for m in (1, 2, 2.5, 5, 10):
+        if top / 4 <= step * m:
+            step *= m
+            break
+    ticks = [int(t) for t in range(0, int(top) + int(step), int(step))]
+    finish(ax, T, "One source, five targets",
+           "the same do concurrent kernel at nz=50, production 473\u00d7297, "
+           "frame fitted \u2014 lower is better",
+           "ns per column", "", ticks)
+    ax.get_xaxis().set_major_formatter(FuncFormatter(lambda v, p: f"{int(v):,}"))
+    ax.annotate("a whole CPU socket, second", (bars[1][0], 1), xytext=(52, 0),
+                textcoords="offset points", ha="left", va="center", fontsize=9,
+                color=T["ink3"], style="italic")
+    figs["fig7_portability"] = f
 
     for f in figs.values():
         f.tight_layout()

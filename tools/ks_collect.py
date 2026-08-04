@@ -88,22 +88,64 @@ def load(audit=False):
 
 def toolchain(r):
     """compiler + VERSION. `compiler` alone is not a toolchain: two gfortran
-    modules both report `gfortran` and do not even offer the same lanes."""
+    modules both report `gfortran` and do not even offer the same lanes.
+
+    The compiler is basename'd: `FC` is sometimes an absolute path (an env
+    script exporting the full nvhpc install prefix), which both makes an
+    unreadable legend entry and splits one toolchain into two."""
+    c = os.path.basename(r["compiler"])
     m = re.search(r"(\d+\.\d+(?:\.\d+)?)", r.get("compiler_ver") or "")
-    return f"{r['compiler']} {m.group(1)}" if m else r["compiler"]
+    return f"{c} {m.group(1)}" if m else c
+
+
+# `device` is whatever the operator typed at run time -- a nvidia-smi product
+# name from the probing harness, a hand-set label from ks_min.conf, or a full
+# /proc/cpuinfo model string. ONE V100 in this repo answers to three of them
+# ("Tesla V100-DGXS-32GB", "Tesla V100", "V100"), which on a chart is three
+# GPUs. Canonicalise on the way in; these are also the names a reader sees.
+SHORT_DEV = {"Intel(R) Xeon(R) CPU E5-2698 v4 @ 2.20GHz": "Broadwell",
+             "Tesla V100-DGXS-32GB": "V100", "Tesla V100": "V100"}
+
+
+def short_dev(r):
+    return SHORT_DEV.get(r["device"], r["device"])
+
+
+def series(r):
+    """DEVICE + toolchain -- the label for a CPU line.
+
+    Toolchain alone is not identity: `gfortran 15.2.0` is the Mac and
+    `gfortran 16.1.0` is Broadwell, and a legend carrying only the version
+    asks the reader to know that. The earlier form of this bug put three
+    entries reading `Broadwell` on one chart."""
+    return f"{short_dev(r)} / {toolchain(r)}"
 
 
 # The identity of a measurement. Anything omitted here is something two
 # different runs are allowed to disagree about while silently overwriting each
 # other -- which is exactly how the grid bug happened.
-KEY = ("device", "mode", "impl", "variant", "lanes", "stack_policy",
-       "copy_policy", "nzstack", "bcopy", "threads", "nz", "nxp", "nyp",
+KEY = ("device", "mode", "impl", "launcher", "variant", "lanes", "stack_policy",
+       "copy_policy", "phys", "nzstack", "bcopy", "threads", "nz", "nxp", "nyp",
        "land_pct")
+# `phys` is the physics profile (faithful | prod) and is load-bearing in the
+# identity: `prod` is a 4.6-7.3x more expensive PROBLEM, not a faster or slower
+# way of doing the same one. Without it here, a prod row and a faithful row at
+# the same (device, nz) collapse to one key and tidy() keeps whichever was
+# quicker -- i.e. it would silently discard every prod measurement. Rows written
+# before the column existed normalise to "faithful", which is what they are.
+# `launcher` (solo | cmp) is part of the identity: the same do-concurrent kernel
+# is measured BOTH on its own and inside the CUDA head-to-head binary, and
+# without this the two collapse to one key and tidy() silently keeps whichever
+# ran faster. They agree to 1.000 on GH200 -- which is a RESULT (the cmp harness
+# does not perturb the DC side), and one worth being able to check rather than
+# having it averaged away.
 
 
 def tidy(rows):
     out = {}
     for r in rows:
+        r["device"] = short_dev(r)     # canonical BEFORE it enters the identity
+        r["phys"] = r.get("phys") or "faithful"
         k = tuple(r.get(c, "") for c in KEY) + (toolchain(r),)
         prev = out.get(k)
         # Same configuration measured twice: keep the faster (min-of-runs is the
@@ -141,13 +183,24 @@ def main():
             if (r["device"] == dev and r["mode"] == mode and r["stack_policy"] == sp
                     and int(r["nz"]) == nz and r["nxp"] == nxp):
                 return float(r["ns_per_col"])
-    def cpu(dev, nz):
+    def cpu(dev, nz, nxp="64", sp="fit"):
+        """Best threaded CPU ns/col.
+
+        ⚠ GRID MISMATCH, MEASURED. The default nxp=64 (4,900 columns) is the grid
+        the CPU lanes were swept at, while pick() reads the GPU at production
+        473x297 (145,137 columns). On Grace, running the SAME threaded lane at
+        both grids costs 10-18% more per column at production (1.10x at nz=10,
+        1.18x at nz=100, 72 threads) -- the small grid's 3D fields are L3-resident
+        and the production one's are not. So any cpu()/gpu ratio built from the
+        default is biased IN THE CPU'S FAVOUR by roughly that much. Pass
+        nxp="473" wherever production-grid CPU rows exist (currently Grace only,
+        stack_policy="prod")."""
         v = [float(r["ns_per_col"]) for r in rows
              if r["device"] == dev and r["mode"] == "dc_multicore"
-             and int(r["nz"]) == nz and r["stack_policy"] == "fit" and r["nxp"] == "64"]
+             and int(r["nz"]) == nz and r["stack_policy"] == sp and r["nxp"] == nxp]
         return min(v) if v else None
 
-    GPU = {"NVIDIA V100": ("Tesla V100-DGXS-32GB", "dc_gpu_acc"),
+    GPU = {"NVIDIA V100": ("V100", "dc_gpu_acc"),
            "NVIDIA GH200": ("GH200", "dc_gpu"),
            "AMD MI250X": ("MI250X", "dc_gpu"),
            "Intel Max": ("Intel GPU", "dc_gpu")}
@@ -158,20 +211,56 @@ def main():
     o["gpu_vs_cpu"] = {
         "AMD MI250X / EPYC 7A53": [cpu("EPYC 7A53", nz) / pick("MI250X", "dc_gpu", "fit", nz) for nz in NZ],
         "Intel Max / Xeon Max": [cpu("Xeon Max", nz) / pick("Intel GPU", "dc_gpu", "fit", nz) for nz in NZ]}
+    # The one pair measured at the SAME grid on both sides -- no cache-residency
+    # correction owed, and the only whole-GPU-vs-whole-socket number in the set.
+    # Kept separate from gpu_vs_cpu above because the unit differs: those two are
+    # ONE GCD / ONE tile against an entire CPU.
+    o["node_gh200"] = [cpu("Grace", nz, nxp="473", sp="prod") / pick("GH200", "dc_gpu", "prod", nz)
+                       for nz in NZ]
+    o["node_gh200_cuda"] = [cpu("Grace", nz, nxp="473", sp="prod")
+                            / pick("GH200", "cuda_faithful", "prod", nz) for nz in NZ]
+
+    # PERFORMANCE PORTABILITY: one `do concurrent` source, every target that ran
+    # it, all at the SAME production grid. The unit is in each label and is NOT
+    # uniform -- an MI250X is measured per GCD and an Intel Max per tile (that is
+    # the unit a rank gets), against whole V100/GH200 GPUs and a whole Grace
+    # socket. Comparing the bars without reading the labels is the mistake this
+    # naming exists to prevent.
+    def at(dev, mode, sp, nz, thr=None):
+        v = [float(r["ns_per_col"]) for r in rows
+             if r["device"] == dev and r["mode"] == mode and r["nxp"] == "473"
+             and r["stack_policy"] == sp and int(r["nz"]) == nz
+             and (thr is None or r["threads"] == thr)]
+        return min(v) if v else None
+    # Grace carries stack_policy=prod because that is the only production-grid
+    # CPU sweep -- legitimate here, and checked: on Grace prod/fit is 0.997-1.010
+    # at every depth, i.e. the frame axis that costs AMD 3x costs this CPU nothing.
+    PORT = [("NVIDIA GH200, full GPU", "GH200", "dc_gpu", "fit", None),
+            ("Grace CPU, 72 cores", "Grace", "dc_multicore", "prod", "72"),
+            ("AMD MI250X, 1 GCD", "MI250X", "dc_gpu", "fit", None),
+            ("NVIDIA V100, full GPU", "V100", "dc_gpu_acc", "fit", None),
+            ("Intel Max, 1 tile", "Intel GPU", "dc_gpu", "fit", None)]
+    o["portability"] = {lab: [at(d, m, sp, nz, t) for nz in NZ]
+                        for lab, d, m, sp, t in PORT}
+    o["portability_is_cpu"] = {lab: m == "dc_multicore" for lab, d, m, sp, t in PORT}
     d = {}
     for r in rows:
         if r["mode"] in ("dc_serial", "serial_do") and r["stack_policy"] == "fit" and r["nxp"] == "64":
-            d.setdefault(toolchain(r), {}).setdefault(r["mode"], {})[int(r["nz"])] = float(r["ns_per_col"])
+            d.setdefault(series(r), {}).setdefault(r["mode"], {})[int(r["nz"])] = float(r["ns_per_col"])
     o["dc_cost"] = {k: [(v["dc_serial"][nz] / v["serial_do"][nz])
                         if nz in v.get("dc_serial", {}) and nz in v.get("serial_do", {}) else None
                         for nz in NZ]
                     for k, v in d.items() if "dc_serial" in v and "serial_do" in v}
-    NAME = {"EPYC 7A53": "EPYC 7A53 / amdflang", "Xeon Max": "Xeon Max / ifx"}
+    # Device from the ROW, never a default. This used to fall back to the string
+    # "Broadwell / " for any device not in a hand-kept name table, so a new
+    # machine's thread curve would have been drawn under the wrong chip's name.
+    # (No version here: each of these devices contributes one build per compiler,
+    # so `Broadwell / ifx` is already unambiguous and shorter to read.)
     t = {}
     for r in rows:
         if (r["mode"] == "dc_multicore" and int(r["nz"]) == 30
                 and r["stack_policy"] == "prod" and r["nxp"] == "64"):
-            t.setdefault(NAME.get(r["device"]) or "Broadwell / " + r["compiler"], {})[int(r["threads"])] = float(r["ns_per_col"])
+            t.setdefault(f"{short_dev(r)} / {r['compiler']}", {})[int(r["threads"])] = float(r["ns_per_col"])
     o["threads"] = {k: [[x, v[min(v)] / v[x]] for x in sorted(v)]
                     for k, v in t.items() if len(v) > 2}
     json.dump(o, sys.stdout, separators=(",", ":"))
