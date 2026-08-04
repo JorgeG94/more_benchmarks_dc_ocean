@@ -34,6 +34,32 @@ source "$CONF"
 DRY=0
 [ "${1:-}" = "-n" ] || [ "${1:-}" = "--dry-run" ] && DRY=1
 
+# ---------------------------------------------------------------------------
+# Normalise the on/off knobs, and REJECT anything unrecognised.
+#
+# `[ "$CUDA" = on ]` is case-sensitive, so `CUDA=ON` silently selected the off
+# path -- while the banner printed "CUDA=ON" and the run looked like it had done
+# what was asked. A knob that quietly does nothing is the worst failure mode in
+# a benchmark harness: it produces a complete, plausible CSV with a whole lane
+# missing. Accept the obvious spellings; refuse the rest loudly.
+# ---------------------------------------------------------------------------
+norm_bool() {
+   case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+      on|1|yes|true|y)      echo on;;
+      off|0|no|false|n|"")  echo off;;
+      *)                    echo invalid;;
+   esac
+}
+for _k in CUDA COUNTERS; do
+   _raw="$(eval printf '%s' "\$$_k")"
+   _v="$(norm_bool "$_raw")"
+   if [ "$_v" = invalid ]; then
+      echo "ERROR: $_k='$_raw' is not a boolean (use on|off, 1|0, yes|no, true|false)" >&2
+      exit 2
+   fi
+   eval "$_k=$_v"
+done
+
 # The per-thread column frame is stack-resident; at a deep NZSTACK it exceeds a
 # default 8 MB thread stack and the failure looks like a code bug.
 ulimit -s unlimited 2>/dev/null || true
@@ -176,7 +202,7 @@ measure() {   # $1 nz, $2 nzstack, $3 stack_policy, $4 threads
 
    # counters pass: integers only, never timed (this kernel is register-bound)
    local dc_ito="" dc_iti=""
-   if [ "$COUNTERS" = 1 ]; then
+   if [ "$COUNTERS" = on ]; then
       if [ "${USING_CMP:-0}" = 1 ]; then set_cmp_args "$nzs" 1; else set_make_args "$nzs" 1; fi
       local cbin; cbin="$(mkprint "$BINVAR")"
       if ( cd "$KDIR" && make "$MKTARGET" "${MKVARS[@]}" ) >/dev/null 2>&1; then
