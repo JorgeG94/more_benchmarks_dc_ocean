@@ -202,7 +202,6 @@ def build(D, T, dark):
     ax.get_yaxis().set_major_formatter(FuncFormatter(lambda v, p: f"{int(v):,}"))
     finish(ax, T, "Time per column with increasing number of layers",
            "do concurrent, 473×297, frame fitted to the column", "nz", "ns per column", nz)
-    label_ends(ax, T, nz, se)
     ax.legend(loc="upper left", ncols=2)
     figs["fig2_depth"] = f
 
@@ -224,7 +223,6 @@ def build(D, T, dark):
     finish(ax, T, "Cost ratio per GPU (MI250X affected by stack max constant)",
            "NZ_STACK_MAX=128 (production) ÷ fitted to nz+1 — identical work, identical answers",
            "nz", "cost ratio, production ÷ fitted", nz)
-    label_ends(ax, T, nz, se, only={"MI250X"})
     # ABOVE the baseline, not below it: at (0, -22) this note landed on the x
     # tick labels and across the three lines it is describing.
     ax.annotate("V100, GH200 and Intel Max sit on 1.0", (nz[-1], 1.0),
@@ -252,7 +250,6 @@ def build(D, T, dark):
            "linear scale: by nz=50 the MI250X frame penalty is gone\n"
            "and all four agree to within a few percent",
            "nz", "cost ratio, production \u00f7 fitted", nzd)
-    label_ends(ax, T, nzd, se)
     ax.legend(loc="upper left", ncols=4, fontsize=9)
     figs["fig3a_frame_deep"] = f
 
@@ -312,7 +309,6 @@ def build(D, T, dark):
     ax.minorticks_off()
     ax.annotate("ideal", (xs[-1], xs[-1]), xytext=(-4, 9), textcoords="offset points",
                 ha="right", fontsize=9, color=T["ink3"], style="italic")
-    label_ends(ax, T, xs, se)
     ax.legend(loc="upper left", ncols=2, fontsize=8.5)
     figs["fig5_threads"] = f
 
@@ -328,7 +324,6 @@ def build(D, T, dark):
     finish(ax, T, "GH200: Grace versus H200",
            "both sides at production 473\u00d7297, nvfortran, frame at NZ_STACK_MAX=128",
            "nz", "GPU speedup vs 72 Grace cores", nz)
-    label_ends(ax, T, nz, se)
     ax.legend(loc="upper right", ncols=1)
     figs["fig6_node"] = f
 
