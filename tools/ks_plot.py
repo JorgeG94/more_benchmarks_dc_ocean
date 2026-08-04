@@ -233,6 +233,29 @@ def build(D, T, dark):
     ax.legend(loc="upper right", ncols=2)
     figs["fig3_frame"] = f
 
+    # 3a — the same ratio from nz=50 on, LINEAR. Once MI250X has converged, the
+    # log axis fig3 needs to show its 14.8x compresses everything into a band
+    # around 1.0 and the residual differences between the four are unreadable.
+    # This is the deep-water half of the same measurement, at a scale that can
+    # resolve it: the claim here is that AMD has JOINED the others, and a reader
+    # should be able to see by how much rather than take it on trust.
+    f, ax = plt.subplots(figsize=(7.6, 4.0))
+    j0 = nz.index(50)
+    nzd = nz[j0:]
+    se = [("V100", D["frame"]["NVIDIA V100"][j0:], S[0], False),
+          ("GH200", D["frame"]["NVIDIA GH200"][j0:], S[1], False),
+          ("MI250X", D["frame"]["AMD MI250X"][j0:], S[2], False),
+          ("Intel Max", D["frame"]["Intel Max"][j0:], S[3], False)]
+    plot_lines(ax, T, nzd, se, baseline=1.0)
+    ax.set_ylim(0.9, 1.12)
+    finish(ax, T, "Cost ratio per GPU, deep columns only (nz \u2265 50)",
+           "linear scale: by nz=50 the MI250X frame penalty is gone\n"
+           "and all four agree to within a few percent",
+           "nz", "cost ratio, production \u00f7 fitted", nzd)
+    label_ends(ax, T, nzd, se)
+    ax.legend(loc="upper left", ncols=4, fontsize=9)
+    figs["fig3a_frame_deep"] = f
+
     # 4 — DC costs nothing on CPU; emphasis on the flang family
     f, ax = plt.subplots(figsize=(7.6, 4.3))
     # The order is hand-set (the two flang-family lines carry the emphasis), so
@@ -260,12 +283,11 @@ def build(D, T, dark):
     ax.legend(loc="upper right", ncols=2, fontsize=8.5)
     figs["fig4_dc_cost"] = f
 
-    # 5 — CPU scaling as PARALLEL EFFICIENCY (speedup / threads), not raw
-    # speedup. Raw speedup on a log-x axis is dominated by the machines with the
-    # most cores and says nothing about how well any of them scales; normalised
-    # to the ideal, 1.0 is perfect and every curve is directly comparable
-    # regardless of socket width. Deviation below 1.0 IS the finding.
-    f, ax = plt.subplots(figsize=(7.6, 4.3))
+    # 5 — classic strong scaling: speedup against threads, with the ideal drawn
+    # as a reference. LOG-LOG, so ideal is a straight 45-degree line and the gap
+    # to it is read as vertical distance at any width -- on linear axes the
+    # low-thread end collapses into the corner and the ideal curves away.
+    f, ax = plt.subplots(figsize=(7.6, 4.6))
     PICK = {"Grace / nvfortran": (S[1], False),
             "Xeon Max / ifx": (S[3], False),
             "EPYC 7A53 / amdflang": (S[2], False),
@@ -275,15 +297,23 @@ def build(D, T, dark):
     for k in sorted(D["threads"], key=lambda k: k not in PICK):
         col, ctx = PICK.get(k, (T["ctx"], True))
         m = dict(D["threads"][k])
-        se.append((k, [(m[t] / t if t in m else None) for t in xs], col, ctx))
-    plot_lines(ax, T, xs, se, baseline=1.0)
-    ax.set_ylim(0, 1.25)
+        se.append((k, [m.get(t) for t in xs], col, ctx))
+    ax.plot(xs, xs, color=T["ink3"], lw=1.0, ls=(0, (3, 3)), zorder=1, label="_ideal")
+    plot_lines(ax, T, xs, se)
+    ax.set_xscale("log"); ax.set_yscale("log")
+    yt = [1, 2, 4, 8, 16, 32, 64, 128]
+    ax.set_yticks(yt)
+    ax.get_yaxis().set_major_formatter(FuncFormatter(lambda v, p: f"{int(v)}"))
+    ax.set_ylim(0.9, 150)
     ticks = [1, 2, 4, 8, 16, 32, 72, 104]
     finish(ax, T, "CPU scaling",
-           "parallel efficiency = speedup ÷ threads; 1.0 is ideal linear scaling, nz=30",
-           "threads", "parallel efficiency", ticks, logx=True)
+           "strong scaling at nz=30, one socket; dashed line is ideal (speedup = threads)",
+           "threads", "speedup vs 1 thread", ticks, logx=True)
+    ax.minorticks_off()
+    ax.annotate("ideal", (xs[-1], xs[-1]), xytext=(-4, 9), textcoords="offset points",
+                ha="right", fontsize=9, color=T["ink3"], style="italic")
     label_ends(ax, T, xs, se)
-    ax.legend(loc="lower left", ncols=2, fontsize=8.5)
+    ax.legend(loc="upper left", ncols=2, fontsize=8.5)
     figs["fig5_threads"] = f
 
     # 6 - the only same-grid, whole-device-vs-whole-socket comparison in the set.
