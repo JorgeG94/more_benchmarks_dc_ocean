@@ -414,6 +414,87 @@ VLEN=8 already regresses here, the binding constraint is masking overhead and
 footprint rather than vector width — which predicts AVX-512 will help the
 single-threaded lane and not the fully-threaded one.
 
+## The four-machine picture (2026-08-03/04)
+
+One `do concurrent` source. Four compilers, three GPU vendors, five devices.
+
+### Correctness first
+
+**Bit-identical everywhere.** 13 distinct problem sizes, every lane, same
+`kd_sum` AND same iteration counts: nvfortran (OpenACC and OpenMP-target on
+V100/GH200), amdflang (OpenMP-target device, MI250X gfx90a), ifx
+(OpenMP-target spir64, Intel Max), plus serial-do and multicore under
+nvfortran / ifx / gfortran / flang, plus both hand-written CUDA kernels. For an
+ITERATIVE solver with convergence tests that is not a given -- a 1-ulp
+difference can flip a test and diverge. It did not, anywhere.
+
+### The result that matters: is the GPU worth it?
+
+ns/column, nz=30, `fit`, 473x297. "host CPU" is the SAME node's CPU with the
+SAME compiler, so only the device changes:
+
+| device | GPU | host CPU | GPU/CPU |
+|---|---|---|---|
+| NVIDIA V100 | 268.5 | (not measured) | - |
+| NVIDIA GH200 | 86.5 | (not measured) | - |
+| AMD MI250X (1 GCD) | 225.2 | 269.8 (EPYC 7A53, 56t) | **1.20x** |
+| Intel Max (1 tile) | 323.7 | 227.7 (Xeon Max, 104t) | **0.70x** |
+
+Over the full depth range: MI250X 1.34x at nz=10 falling to **0.96-0.98x by
+nz=75-100 -- i.e. the GPU LOSES to its own host**; Intel Max is 0.60-0.70x
+throughout, never winning at any depth. Per-GCD / per-tile is the correct unit
+(one MPI rank each), so these are per-rank figures.
+
+⚠ The NVIDIA rows have no host-CPU comparison yet -- that cell needs a
+`MODE=dc_multicore` run on the GH200's Grace CPU. Without it we cannot say
+whether NVIDIA's offload advantage is large or merely positive.
+
+### Why -- and it is NOT `do concurrent`
+
+`dc_serial / serial_do` on the CPU, i.e. what the abstraction costs with no
+offload involved:
+
+| compiler | machine | ratio over nz=10..100 |
+|---|---|---|
+| nvfortran 26.5 | Broadwell | 0.997 - 1.001 |
+| ifx 2026.0 | Broadwell | 0.996 - 1.005 |
+| ifx 2025.3.2 | Xeon Max | 0.998 - 1.001 |
+| gfortran 16.1 | Broadwell | 0.984 - 1.011 |
+| flang 22.1.5 | Broadwell | 1.004 - **1.170** |
+| amdflang 23.0.0git | EPYC 7A53 | 1.002 - **1.125** |
+
+`do concurrent` is FREE against plain nested loops on nvfortran, ifx and
+gfortran. The flang family carries a fixed per-loop cost visible only at nz=10,
+reproduced independently on two LLVM versions, two vendors' packaging and two
+ISAs -- and `it/col` explains why it only shows there: 2.37 Picard iterations
+per column at nz=10 versus ~20 elsewhere, so a fixed cost has nothing to hide
+behind.
+
+So the weak link is the OFFLOAD LOWERING, not the language feature. On Intel
+that is stark: the same compiler whose CPU DC lowering is the tightest of all
+six (0.998-1.001) produces device code that loses to its own CPU by 1.4x.
+`LIBOMPTARGET_INFO` shows the kernel entering with 87 arguments and multi-MB
+`tofrom` maps despite the driver having pre-mapped everything with
+`DC_ENTER_IN`, which points at the DC->target pass re-establishing the data
+environment per launch.
+
+### Thread scaling (dc_multicore, nz=30, fit)
+
+| CPU | compiler | threads | speedup |
+|---|---|---|---|
+| Xeon Max | ifx 2025.3.2 | 104 | 44.75x |
+| EPYC 7A53 | amdflang 23.0.0git | 56 | 37.83x |
+| Broadwell | ifx 2026.0 | 40 | 24.24x |
+| Broadwell | nvfortran 26.5 | 40 | 21.22x |
+
+### What is still missing
+
+- GH200 `CUDA=on` (the DC-vs-CUDA ratio on Hopper, and the register split)
+- GH200 Grace-CPU `dc_multicore` (the NVIDIA GPU/CPU cell above)
+- a hand-written `!$omp target teams distribute` control, which is the only
+  thing that separates "the DC->target lowering is weak" from "this vendor's
+  offload stack is slow" -- the vendor-neutral analogue of the CUDA comparison
+
 ## Methodology / traps
 
 - **Correctness = bit-identity**, bar `max rel diff < 1e-12` (FMA-contraction
