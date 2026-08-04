@@ -161,28 +161,34 @@ def build(D, T, dark):
     nz = D["nz"]
     S = T["s"]
 
-    # 1 — the headline: is the GPU worth it?
-    f, ax = plt.subplots(figsize=(7.6, 4.3))
-    se = [("MI250X", D["gpu_vs_cpu"]["AMD MI250X / EPYC 7A53"], S[2], False),
-          ("Intel Max", D["gpu_vs_cpu"]["Intel Max / Xeon Max"], S[3], False)]
+    # 1 — every GPU against the whole CPU in its own node.
+    # LOG y: the pairs span 0.6x to 5.9x, and on a ratio axis log puts 1.0 in the
+    # middle so "twice as fast" and "half as fast" are the same visual distance.
+    f, ax = plt.subplots(figsize=(7.6, 4.5))
+    order = ["NVIDIA GH200 / Grace, 72 threads", "NVIDIA V100 / Broadwell, 40 threads",
+             "AMD MI250X, 1 GCD / EPYC 7A53, 56 thr", "Intel Max, 1 tile / Xeon Max, 104 thr"]
+    miss = [k for k in order if k not in D["gpu_vs_cpu"]]
+    if miss:
+        raise SystemExit(f"fig1: missing pairs {miss}")
+    se = [(k, D["gpu_vs_cpu"][k], S[i2], False) for i2, k in enumerate(order)]
     plot_lines(ax, T, nz, se, baseline=1.0)
-    ax.fill_between(nz, 0, 1, color=T["ink3"], alpha=0.05, zorder=0)
-    ax.set_ylim(0.4, 1.5)
-    finish(ax, T, "Is the GPU worth it?",
-           "one GCD / one tile vs the whole same-node CPU\n"
-           "the CPU grid is smaller and cache-resident, favouring the CPU by ~10\u201318%",
-           "nz", "GPU speedup vs same-node CPU", nz)
-    ax.annotate("GPU loses", (nz[0], 0.99), xytext=(6, -13), textcoords="offset points",
+    ax.set_yscale("log")
+    ax.set_ylim(0.5, 7.0)
+    ax.set_yticks([0.5, 1, 2, 3, 5, 7])
+    ax.get_yaxis().set_major_formatter(FuncFormatter(lambda v, p: f"{v:g}×"))
+    ax.minorticks_off()
+    ax.fill_between(nz, 0.5, 1, color=T["ink3"], alpha=0.06, zorder=0)
+    finish(ax, T, "Single GPU speedup versus whole CPU",
+           "same do concurrent source on both sides; only the GH200/Grace pair is measured\n"
+           "at the production grid on BOTH sides — the rest run the CPU at 64², which "
+           "flatters it by ~10–18%",
+           "nz", "GPU ÷ whole-CPU-socket", nz)
+    ax.annotate("GPU slower", (nz[0], 0.985), xytext=(6, -14), textcoords="offset points",
                 ha="left", fontsize=9, color=T["ink3"], style="italic")
-    label_ends(ax, T, nz, se)
-    # PAIR HANDLES TO LABELS EXPLICITLY. `ax.legend([str, str])` assigns labels to
-    # artists in DRAW order, and the baseline axhline is drawn first -- so it
-    # silently took the first string and every series label shifted by one. The
-    # green line ended up direct-labelled MI250X and legended "Intel Max".
+    # Identity via the legend only -- the pair names are long and duplicating them
+    # as end labels crowds the right margin for no extra information.
     hs = {l.get_label(): l for l in ax.get_lines()}
-    ax.legend([hs["MI250X"], hs["Intel Max"]],
-              ["MI250X (1 GCD) / EPYC 7A53, 56 threads",
-               "Intel Max (1 tile) / Xeon Max, 104 threads"], loc="lower left", ncols=1)
+    ax.legend([hs[k] for k in order], order, loc="upper right", ncols=1, fontsize=8.5)
     figs["fig1_gpu_vs_cpu"] = f
 
     # 2 — depth curve
@@ -194,7 +200,7 @@ def build(D, T, dark):
     plot_lines(ax, T, nz, se)
     ax.set_ylim(0, None)
     ax.get_yaxis().set_major_formatter(FuncFormatter(lambda v, p: f"{int(v):,}"))
-    finish(ax, T, "Cost per column as columns get deeper",
+    finish(ax, T, "Time per column with increasing number of layers",
            "do concurrent, 473×297, frame fitted to the column", "nz", "ns per column", nz)
     label_ends(ax, T, nz, se)
     ax.legend(loc="upper left", ncols=2)
@@ -206,9 +212,16 @@ def build(D, T, dark):
           ("GH200", D["frame"]["NVIDIA GH200"], S[1], False),
           ("MI250X", D["frame"]["AMD MI250X"], S[2], False),
           ("Intel Max", D["frame"]["Intel Max"], S[3], False)]
-    plot_lines(ax, T, nz, se, baseline=1.0, clip=3.4)
-    ax.set_ylim(0.8, 3.9)
-    finish(ax, T, "One compile-time constant costs AMD 3×, and nobody else anything",
+    # LOG y instead of clipping. The MI250X curve runs 14.8x -> 1.0 while the
+    # other three sit inside 0.98-1.13; on a linear axis one of those is a flat
+    # line at the bottom and the finding for the other three is invisible.
+    plot_lines(ax, T, nz, se, baseline=1.0)
+    ax.set_yscale("log")
+    ax.set_ylim(0.85, 20)
+    ax.set_yticks([1, 1.5, 2, 3, 5, 10, 15])
+    ax.get_yaxis().set_major_formatter(FuncFormatter(lambda v, p: f"{v:g}×"))
+    ax.minorticks_off()
+    finish(ax, T, "Cost ratio per GPU (MI250X affected by stack max constant)",
            "NZ_STACK_MAX=128 (production) ÷ fitted to nz+1 — identical work, identical answers",
            "nz", "cost ratio, production ÷ fitted", nz)
     label_ends(ax, T, nz, se, only={"MI250X"})
@@ -240,23 +253,19 @@ def build(D, T, dark):
           for i, k in enumerate(order)]
     plot_lines(ax, T, nz, se, baseline=1.0)
     ax.set_ylim(0.94, 1.22)
-    finish(ax, T, "do concurrent itself is free — the offload lowering is not",
+    finish(ax, T, "do concurrent on the CPU (serial / threaded) effects",
            "serial do concurrent ÷ plain nested do loops, no offload involved",
            "nz", "dc_serial ÷ serial_do", nz)
-    label_ends(ax, T, nz, se)
+    # No end labels: they repeat the legend verbatim and crowd the converged tail.
     ax.legend(loc="upper right", ncols=2, fontsize=8.5)
     figs["fig4_dc_cost"] = f
 
-    # 5 — thread scaling.
-    # THREE colours, not five. Five series would cycle the palette (two lines the
-    # same hue) and breach the validated ceiling. The three Broadwell compilers
-    # sit on top of each other anyway, so one carries the colour and the other two
-    # are context grey -- which is also the honest reading: the machines differ,
-    # the compilers on a given machine barely do.
+    # 5 — CPU scaling as PARALLEL EFFICIENCY (speedup / threads), not raw
+    # speedup. Raw speedup on a log-x axis is dominated by the machines with the
+    # most cores and says nothing about how well any of them scales; normalised
+    # to the ideal, 1.0 is perfect and every curve is directly comparable
+    # regardless of socket width. Deviation below 1.0 IS the finding.
     f, ax = plt.subplots(figsize=(7.6, 4.3))
-    # FOUR colours -- the palette's full validated set, no cycling. Grace earns
-    # one: 72 cores at 90% parallel efficiency is the finding on this panel, and
-    # drawing it in context grey would bury it among the three Broadwell lines.
     PICK = {"Grace / nvfortran": (S[1], False),
             "Xeon Max / ifx": (S[3], False),
             "EPYC 7A53 / amdflang": (S[2], False),
@@ -266,15 +275,15 @@ def build(D, T, dark):
     for k in sorted(D["threads"], key=lambda k: k not in PICK):
         col, ctx = PICK.get(k, (T["ctx"], True))
         m = dict(D["threads"][k])
-        se.append((k, [m.get(t) for t in xs], col, ctx))
-    plot_lines(ax, T, xs, se)
-    ax.set_ylim(0, None)
+        se.append((k, [(m[t] / t if t in m else None) for t in xs], col, ctx))
+    plot_lines(ax, T, xs, se, baseline=1.0)
+    ax.set_ylim(0, 1.25)
     ticks = [1, 2, 4, 8, 16, 32, 72, 104]
-    finish(ax, T, "The CPU lanes scale",
-           "same source, three threading mechanisms; speedup vs each machine's own 1 thread, nz=30",
-           "threads", "speedup vs 1 thread", ticks, logx=True)
+    finish(ax, T, "CPU scaling",
+           "parallel efficiency = speedup ÷ threads; 1.0 is ideal linear scaling, nz=30",
+           "threads", "parallel efficiency", ticks, logx=True)
     label_ends(ax, T, xs, se)
-    ax.legend(loc="upper left", ncols=1, fontsize=8.5)
+    ax.legend(loc="lower left", ncols=2, fontsize=8.5)
     figs["fig5_threads"] = f
 
     # 6 - the only same-grid, whole-device-vs-whole-socket comparison in the set.
@@ -283,10 +292,10 @@ def build(D, T, dark):
     # reader to compare numbers that are not the same measurement.
     f, ax = plt.subplots(figsize=(7.6, 4.3))
     se = [("do concurrent", D["node_gh200"], S[1], False),
-          ("hand CUDA", D["node_gh200_cuda"], S[0], False)]
+          ("CUDA", D["node_gh200_cuda"], S[0], False)]
     plot_lines(ax, T, nz, se, baseline=1.0)
     ax.set_ylim(0, None)
-    finish(ax, T, "One GH200: the Hopper GPU against the whole Grace socket",
+    finish(ax, T, "GH200: Grace versus H200",
            "both sides at production 473\u00d7297, nvfortran, frame at NZ_STACK_MAX=128",
            "nz", "GPU speedup vs 72 Grace cores", nz)
     label_ends(ax, T, nz, se)
@@ -324,7 +333,7 @@ def build(D, T, dark):
             step *= m
             break
     ticks = [int(t) for t in range(0, int(top) + int(step), int(step))]
-    finish(ax, T, "One source, five targets",
+    finish(ax, T, "Do concurrent performance portability",
            "the same do concurrent kernel at nz=50, production 473\u00d7297, "
            "frame fitted \u2014 lower is better",
            "ns per column", "", ticks)

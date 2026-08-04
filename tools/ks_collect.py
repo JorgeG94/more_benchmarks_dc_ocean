@@ -208,9 +208,21 @@ def main():
     o["gpu_ns"] = {k: [pick(d, m, "fit", nz) for nz in NZ] for k, (d, m) in GPU.items()}
     o["frame"] = {k: [(lambda a, b: a / b if a and b else None)(pick(d, m, "prod", nz), pick(d, m, "fit", nz))
                       for nz in NZ] for k, (d, m) in GPU.items()}
-    o["gpu_vs_cpu"] = {
-        "AMD MI250X / EPYC 7A53": [cpu("EPYC 7A53", nz) / pick("MI250X", "dc_gpu", "fit", nz) for nz in NZ],
-        "Intel Max / Xeon Max": [cpu("Xeon Max", nz) / pick("Intel GPU", "dc_gpu", "fit", nz) for nz in NZ]}
+    # Each GPU against the whole CPU in its own node. cpu_nxp is per-pair
+    # because only Grace has a PRODUCTION-GRID threaded sweep; the rest are at
+    # 64^2, where the 3D fields are cache-resident and the CPU is flattered by
+    # 10-18% (measured on Grace at 72 threads). Pairs carrying that caveat are
+    # marked, so the figure can say which is which rather than averaging it away.
+    PAIRS = [("NVIDIA GH200 / Grace, 72 threads",        "GH200",     "dc_gpu",     "Grace",     "473", "prod"),
+             ("AMD MI250X, 1 GCD / EPYC 7A53, 56 thr",   "MI250X",    "dc_gpu",     "EPYC 7A53", "64",  "fit"),
+             ("NVIDIA V100 / Broadwell, 40 threads",     "V100",      "dc_gpu_acc", "Broadwell", "64",  "fit"),
+             ("Intel Max, 1 tile / Xeon Max, 104 thr",   "Intel GPU", "dc_gpu",     "Xeon Max",  "64",  "fit")]
+    o["gpu_vs_cpu"] = {}
+    o["gpu_vs_cpu_samegrid"] = {}
+    for lab, gdev, gmode, cdev, cnxp, csp in PAIRS:
+        o["gpu_vs_cpu"][lab] = [(lambda c, g: c / g if c and g else None)(
+            cpu(cdev, nz, nxp=cnxp, sp=csp), pick(gdev, gmode, "fit", nz)) for nz in NZ]
+        o["gpu_vs_cpu_samegrid"][lab] = (cnxp == "473")
     # The one pair measured at the SAME grid on both sides -- no cache-residency
     # correction owed, and the only whole-GPU-vs-whole-socket number in the set.
     # Kept separate from gpu_vs_cpu above because the unit differs: those two are
