@@ -215,8 +215,10 @@ def main():
              and int(r["nz"]) == nz and r["stack_policy"] == sp and r["nxp"] == nxp]
         return min(v) if v else None
 
-    GPU = {"NVIDIA V100": ("V100", "dc_gpu_acc"),
-           "NVIDIA GH200": ("GH200", "dc_gpu"),
+    # V100 dropped from the figures: it is the oldest device on both sides of
+    # every comparison it appeared in, and in fig1 its weak Broadwell baseline
+    # made a ratio chart read as "V100 beats GH200". The rows stay in the data.
+    GPU = {           "NVIDIA GH200": ("GH200", "dc_gpu"),
            "AMD MI250X": ("MI250X", "dc_gpu"),
            "Intel Max": ("Intel GPU", "dc_gpu")}
     o = {"nz": NZ}
@@ -230,7 +232,6 @@ def main():
     # marked, so the figure can say which is which rather than averaging it away.
     PAIRS = [("NVIDIA GH200 / Grace, 72 threads",        "GH200",     "dc_gpu",     "Grace",     "473", "prod"),
              ("AMD MI250X, 1 GCD / EPYC 7A53, 56 thr",   "MI250X",    "dc_gpu",     "EPYC 7A53", "473", "prod"),
-             ("NVIDIA V100 / Broadwell, 40 threads",     "V100",      "dc_gpu_acc", "Broadwell", "473", "prod"),
              ("Intel Max, 1 tile / Xeon Max, 104 thr",   "Intel GPU", "dc_gpu",     "Xeon Max",  "473", "prod")]
     o["gpu_vs_cpu"] = {}
     o["gpu_vs_cpu_samegrid"] = {}
@@ -270,8 +271,6 @@ def main():
             ("NVIDIA GH200, do concurrent", "GH200",     "dc_gpu",        "fit", None, "gpu"),
             ("Grace CPU, 72 cores",         "Grace",     "dc_multicore",  "prod", "72", "cpu"),
             ("AMD MI250X, 1 GCD",           "MI250X",    "dc_gpu",        "fit", None, "gpu"),
-            ("NVIDIA V100, CUDA",           "V100",      "cuda_faithful", "fit", None, "cuda"),
-            ("NVIDIA V100, do concurrent",  "V100",      "dc_gpu_acc",    "fit", None, "gpu"),
             ("Intel Max, 1 tile",           "Intel GPU", "dc_gpu",        "fit", None, "gpu")]
     o["portability"] = {lab: [at(d, m, sp, nz, t) for nz in NZ]
                         for lab, d, m, sp, t, k in PORT}
