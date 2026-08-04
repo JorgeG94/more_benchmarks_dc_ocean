@@ -291,8 +291,12 @@ def main():
         if r["mode"].startswith("dc_gpu") or r["mode"] == "cuda_faithful":
             kind = "CUDA" if r["mode"] == "cuda_faithful" else "do concurrent"
             key = f"{short_dev(r)}, {kind}"
+            # x is ni*nj, the COMPUTE domain the operator asked for -- not ncols,
+            # which is (ni+6)*(nj+6) because the kernel also solves the 3-deep
+            # halo. The two differ by 47% at 32x32 and 0.6% at 2048x2048, so
+            # which one is on the axis changes the shape at the small end.
             grid.setdefault(key, {}).setdefault(int(r["nz"]), []).append(
-                (int(r["ncols"]), float(r["ns_per_col"])))
+                (int(r["nxp"]) * int(r["nyp"]), float(r["ns_per_col"])))
     # keep the depth with the widest grid coverage, so the panel is one clean
     # curve per lane rather than a mix of depths
     # EVERY depth with enough coverage, not just the widest. The deep series and
