@@ -60,6 +60,12 @@ NZ_STACK_MAX swept: 11,26,31,51,76,101,128
 **dc_gpu** — `nvfortran` 26.3
 
 ```
+-Mfree -Mbackslash -O3 -fast -I../common -DKS_NO_NEWTON -stdpar=gpu -acc=gpu -gpu=cc90,mem:separate -gpu=tripcount:host -DDC_DATA_ACC
+```
+NZ_STACK_MAX swept: 31,76
+
+
+```
 -Mfree -Mbackslash -O3 -fast -I../common -stdpar=gpu -acc=gpu -gpu=cc90,mem:separate -gpu=tripcount:host -DDC_DATA_ACC
 ```
 NZ_STACK_MAX swept: 11,26,31,51,76,101,128
@@ -362,4 +368,4 @@ NZ_STACK_MAX swept: 11,26,31,51,76,101,128
 NZ_STACK_MAX swept: 11,26,31,51,76,101,128
 
 
-> 9 lane(s) show more than one compile line — see above.
+> 10 lane(s) show more than one compile line — see above.

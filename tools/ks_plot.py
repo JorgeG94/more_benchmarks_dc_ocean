@@ -407,16 +407,30 @@ def build(D, T, dark):
     # a sweep exists; skipped silently otherwise so the other panels still build.
     if D.get("grid"):
         f, ax = plt.subplots(figsize=(7.6, 4.4))
-        keys = sorted(D["grid"])
-        se = []
+        # GH200 carries the finding; one V100 lane at the SAME depth stays as grey
+        # context, because "the older GPU is still falling where this one has
+        # flattened" is the comparison. The other V100 lanes only add lines.
+        keys = [k for k in sorted(D["grid"]) if k.startswith("GH200")]
+        ctxk = [k for k in sorted(D["grid"])
+                if k == "V100, do concurrent, nz=30"]
+        se = [(k, [ns for _, ns in D["grid"][k]["pts"]], S[i2 % 4], False)
+              for i2, k in enumerate(keys + ctxk)]
+        # each lane carries its OWN x values -- the shallow and deep sweeps do not
+        # share grids, and zipping one lane's y against another's x silently
+        # slides the whole curve sideways
+        allc = sorted({c for k in keys + ctxk for c, _ in D["grid"][k]["pts"]})
+        xs = [t for t in (1000, 10000, 100000, 1000000, 10000000)
+              if min(allc) * 0.6 <= t <= max(allc) * 1.6]
+        for k in ctxk:
+            pts = D["grid"][k]["pts"]
+            ax.plot([c for c, _ in pts], [v for _, v in pts], color=T["ctx"],
+                    lw=1.4, marker="o", ms=4.0, markeredgecolor=T["paper"],
+                    markeredgewidth=1.2, label=k, zorder=2)
         for i2, k in enumerate(keys):
             pts = D["grid"][k]["pts"]
-            se.append((f"{k}  (nz={D['grid'][k]['nz']})",
-                       [ns for _, ns in pts], S[i2 % 4], False))
-        xs = [c for c, _ in D["grid"][keys[0]]["pts"]]
-        for name, ys, col, _ in se:
-            ax.plot(xs[:len(ys)], ys, color=col, lw=2.0, marker="o", ms=5.5,
-                    markeredgecolor=T["paper"], markeredgewidth=1.2, label=name)
+            ax.plot([c for c, _ in pts], [v for _, v in pts], color=S[i2 % 4],
+                    lw=2.0, marker="o", ms=5.5, markeredgecolor=T["paper"],
+                    markeredgewidth=1.2, label=k, zorder=3)
         ax.axvline(145137, color=T["ink3"], lw=1.0, ls=(0, (3, 3)), zorder=1)
         ax.set_xscale("log"); ax.set_yscale("log")
         # EXPLICIT y ticks. On a log axis matplotlib only labels decades, and this
@@ -427,18 +441,25 @@ def build(D, T, dark):
         yt = [c * 10 ** e for e in range(-1, 6) for c in cand
               if lo * 0.75 <= c * 10 ** e <= hi * 1.35]
         ax.set_yticks(yt)
-        ax.get_xaxis().set_major_formatter(FuncFormatter(lambda v, p: f"{int(v):,}"))
+        ax.get_xaxis().set_major_formatter(FuncFormatter(
+            lambda v, p: f"{int(v/1e6)}M" if v >= 1e6 else f"{int(v/1000)}k"))
         ax.get_yaxis().set_major_formatter(
             FuncFormatter(lambda v, p: f"{v:,.0f}" if v >= 10 else f"{v:g}"))
         ax.minorticks_off()
-        # bottom-anchored, clear of the legend in the upper right
-        ax.annotate("production\ngrid", (145137, lo * 0.8), xytext=(-7, 2),
+        # Anchored in AXES fraction vertically, so it cannot fall outside the
+        # ylim the way a data-space y did once the shallow series lowered the
+        # floor -- it was clipped off the canvas entirely.
+        ax.annotate("production grid", xy=(145137, 0.02),
+                    xycoords=("data", "axes fraction"), xytext=(-7, 0),
                     textcoords="offset points", ha="right", va="bottom",
                     fontsize=9, color=T["ink3"], style="italic")
         finish(ax, T, "Cost per column against problem size",
                "a flat line means the device is saturated; a falling one means it is not\n"
                "MOM6 decomposes across ranks, so a rank drives its GPU with ITS OWN tile",
                "columns solved", "ns per column", xs)
+        ax.set_xticks(xs)
+        ax.set_xticklabels([f"{int(t/1e6)}M" if t >= 1e6 else f"{int(t/1000)}k"
+                            for t in xs])
         ax.legend(loc="upper right", ncols=1, fontsize=9)
         figs["fig8_gridsize"] = f
 

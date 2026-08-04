@@ -295,12 +295,16 @@ def main():
                 (int(r["ncols"]), float(r["ns_per_col"])))
     # keep the depth with the widest grid coverage, so the panel is one clean
     # curve per lane rather than a mix of depths
+    # EVERY depth with enough coverage, not just the widest. The deep series and
+    # the shallow one answer different questions: the deep end shows where the
+    # device saturates, the shallow end is the regime a MOM6 rank actually runs
+    # in, and dropping either loses half the point.
     o["grid"] = {}
     for k, byz in grid.items():
-        best = max(byz, key=lambda z: len({c for c, _ in byz[z]}))
-        pts = sorted({c: v for c, v in sorted(byz[best])}.items())
-        if len(pts) >= 3:
-            o["grid"][k] = {"nz": best, "pts": pts}
+        for z, pl in byz.items():
+            pts = sorted({c: v for c, v in sorted(pl)}.items())
+            if len(pts) >= 3:
+                o["grid"][f"{k}, nz={z}"] = {"nz": z, "pts": pts}
     d = {}
     for r in rows:
         if r["mode"] in ("dc_serial", "serial_do") and r["stack_policy"] == "fit" and r["nxp"] == "64":
