@@ -87,7 +87,8 @@ _q() { printf '%s' "$1" | tr '\n"' " '"; }
 MKVARS=(); MKTARGET=""; BINVAR=""
 set_make_args() {   # $1 = nzstack, $2 = counters(0|1)
    local nzs="$1" cnt="$2"
-   MKVARS=(FC="$FC" ARCH="$ARCH" NVARCH="$NVARCH" NZSTACK="$nzs" CNT="$cnt")
+   MKVARS=(FC="$FC" ARCH="$ARCH" NVARCH="$NVARCH" NZSTACK="$nzs" CNT="$cnt"
+           BCOPY="$BCOPY")
    case "$MODE" in
       serial_do)    MKTARGET=serialdo; BINVAR=SDBIN;;
       dc_serial)    MKTARGET=dc; BINVAR=DCBIN
@@ -102,7 +103,7 @@ set_make_args() {   # $1 = nzstack, $2 = counters(0|1)
 }
 set_cmp_args() {    # $1 = nzstack, $2 = counters
    MKVARS=(FC="$FC" ARCH="$ARCH" NVARCH="$NVARCH" NZSTACK="$1" CNT="$2"
-           OPT_NZMAX="$1")
+           BCOPY="$BCOPY" OPT_NZMAX="$1")
    MKTARGET=cmp; BINVAR=CMPBIN
 }
 mkprint() { ( cd "$KDIR" && make -s "print-$1" "${MKVARS[@]}" 2>/dev/null ); }
@@ -259,7 +260,13 @@ for thr in $THREADS_TO_RUN; do
             prod) [ $((nz + 1)) -le 128 ] || { echo "    skip nz=$nz stack=prod (nz+1 > 128)"; continue; }
                   nzs=128;;
             fit)  nzs=$((nz + 1));;
-            *) echo "unknown stack policy '$spol'" >&2; exit 2;;
+            # A bare NUMBER is an explicit NZ_STACK_MAX. That is what lets you
+            # sweep the FRAME at fixed nz -- e.g. STACK_POLICIES="33 48 64 96 128"
+            # at NZ_LIST=30 -- to find where the cost/instability sets in,
+            # rather than only knowing the two endpoints.
+            ''|*[!0-9]*) echo "stack policy must be prod | fit | a number (got '$spol')" >&2; exit 2;;
+            *)    nzs="$spol"
+                  [ "$nzs" -ge $((nz + 1)) ] || { echo "    skip nz=$nz stack=$nzs (needs >= nz+1)"; continue; };;
          esac
          measure "$nz" "$nzs" "$spol" "$thr"
       done

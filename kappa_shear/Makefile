@@ -236,7 +236,13 @@ endif
 # -cuda is LINK-ONLY. It also switches nvfortran into CUDA-Fortran mode, which
 # type-checks device attributes and rejects the host_data bridge's plain host
 # array declarations (NVFORTRAN-S-0528). It must appear ONLY here.
-CMP_LDFLAGS := -stdpar=gpu -acc=gpu -gpu=$(ARCH),mem:separate -cuda
+# -lstdc++ is REQUIRED: nvfortran drives this link, and the nvcc-compiled
+# objects reference the C++ runtime (`__cxa_guard_acquire` -- the guard emitted
+# for a function-local static). nvfortran does not pull libstdc++ in on its own.
+# It happened to resolve on one x86 box and failed on aarch64/GH200 with
+#   undefined reference to symbol '__cxa_guard_acquire@@CXXABI_1.3'
+#   libstdc++.so.6: error adding symbols: DSO missing from command line
+CMP_LDFLAGS := -stdpar=gpu -acc=gpu -gpu=$(ARCH),mem:separate -cuda -lstdc++
 
 CMPTAG := $(TAG)-o$(OPT_NZMAX)
 ifeq ($(FULLCOPY),1)
