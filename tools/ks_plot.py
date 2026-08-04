@@ -170,7 +170,12 @@ def build(D, T, dark):
     miss = [k for k in order if k not in D["gpu_vs_cpu"]]
     if miss:
         raise SystemExit(f"fig1: missing pairs {miss}")
-    se = [(k, D["gpu_vs_cpu"][k], S[i2], False) for i2, k in enumerate(order)]
+    # Mark the pairs whose CPU side is NOT at the production grid. The direction
+    # of that bias is machine-specific and measured, not assumed: at full socket
+    # width Grace is 10-18% SLOWER at 473x297 than at 64^2 while EPYC is 4-5%
+    # FASTER, so "the small grid flatters the CPU" is a Grace fact, not a rule.
+    lab = {k: (k if D["gpu_vs_cpu_samegrid"][k] else k + "  \u2020") for k in order}
+    se = [(lab[k], D["gpu_vs_cpu"][k], S[i2], False) for i2, k in enumerate(order)]
     plot_lines(ax, T, nz, se, baseline=1.0)
     ax.set_yscale("log")
     ax.set_ylim(0.5, 7.0)
@@ -188,7 +193,8 @@ def build(D, T, dark):
     # Identity via the legend only -- the pair names are long and duplicating them
     # as end labels crowds the right margin for no extra information.
     hs = {l.get_label(): l for l in ax.get_lines()}
-    ax.legend([hs[k] for k in order], order, loc="upper right", ncols=1, fontsize=8.5)
+    ax.legend([hs[lab[k]] for k in order], [lab[k] for k in order],
+              loc="upper right", ncols=1, fontsize=8.5)
     figs["fig1_gpu_vs_cpu"] = f
 
     # 2 — depth curve
@@ -282,7 +288,7 @@ def build(D, T, dark):
            S[1] if i == 0 else S[2] if i == 1 else T["ctx"], i >= 2)
           for i, k in enumerate(order)]
     plot_lines(ax, T, nz, se, baseline=1.0)
-    ax.set_ylim(0.82, 1.07)
+    ax.set_ylim(0.82, 1.10)
     finish(ax, T, "do concurrent on the CPU (serial / threaded) effects",
            "serial do concurrent against plain nested do loops, no offload involved\n"
            "1.0 = identical; below 1.0 = do concurrent is slower",
@@ -338,8 +344,10 @@ def build(D, T, dark):
     dcv, cuv = D["node_gh200"], D["node_gh200_cuda"]
     ax.fill_between(nz, dcv, cuv, color=S[0], alpha=0.10, zorder=1, lw=0)
     plot_lines(ax, T, nz, se, baseline=1.0)
-    for j in (0, len(nz) - 1):
-        ax.annotate(f"{cuv[j] / dcv[j]:.2f}×", (nz[j], (dcv[j] + cuv[j]) / 2),
+    # The nz=10 label is pinned low rather than at the band midpoint: the band is
+    # widest and steepest there, and the midpoint put the text on the CUDA curve.
+    for j, ylab in ((0, 3.7), (len(nz) - 1, (dcv[-1] + cuv[-1]) / 2)):
+        ax.annotate(f"{cuv[j] / dcv[j]:.2f}×", (nz[j], ylab),
                     xytext=(9 if j == 0 else -9, 0), textcoords="offset points",
                     ha="left" if j == 0 else "right", va="center",
                     fontsize=9.5, fontweight="600", color=S[0])

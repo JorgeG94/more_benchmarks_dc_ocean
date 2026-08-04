@@ -35,6 +35,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(os.path.dirname(HERE), "paper_data")
+OUT_TIDY = os.path.join(DATA, "tidy.csv")
 
 # Whole files that are known-invalid. Keep them on disk -- they are evidence of
 # the bug -- but never let them into an aggregate.
@@ -62,10 +63,24 @@ def row_reject(r):
 
 def load(audit=False):
     rows, dropped = [], []
-    for p in sorted(glob.glob(os.path.join(DATA, "ks_*.csv"))):
+    # EVERY csv, not just ks_*. A run dropped in as `frontier_cpu_prod.csv`
+    # matched no glob and vanished without a word -- the same silent-omission
+    # failure the filters below exist to prevent. Now the schema decides: a file
+    # carrying the sentinel columns is data, anything else is reported as skipped
+    # rather than ignored.
+    SENTINEL = {"device", "mode", "nz", "ns_per_col", "status"}
+    for p in sorted(glob.glob(os.path.join(DATA, "*.csv"))):
         base = os.path.basename(p)
+        if os.path.abspath(p) == os.path.abspath(OUT_TIDY):
+            continue                      # our own output
         if base in QUARANTINE:
             dropped.append((base, "*", QUARANTINE[base]))
+            continue
+        with open(p) as fh:
+            hdr = (fh.readline() or "").rstrip("\n").split(",")
+        if not SENTINEL.issubset(set(hdr)):
+            dropped.append((base, "*", "not a measurement CSV: header lacks "
+                            + ", ".join(sorted(SENTINEL - set(hdr)))))
             continue
         with open(p) as fh:
             for r in csv.DictReader(fh):
@@ -214,7 +229,7 @@ def main():
     # 10-18% (measured on Grace at 72 threads). Pairs carrying that caveat are
     # marked, so the figure can say which is which rather than averaging it away.
     PAIRS = [("NVIDIA GH200 / Grace, 72 threads",        "GH200",     "dc_gpu",     "Grace",     "473", "prod"),
-             ("AMD MI250X, 1 GCD / EPYC 7A53, 56 thr",   "MI250X",    "dc_gpu",     "EPYC 7A53", "64",  "fit"),
+             ("AMD MI250X, 1 GCD / EPYC 7A53, 56 thr",   "MI250X",    "dc_gpu",     "EPYC 7A53", "473", "prod"),
              ("NVIDIA V100 / Broadwell, 40 threads",     "V100",      "dc_gpu_acc", "Broadwell", "64",  "fit"),
              ("Intel Max, 1 tile / Xeon Max, 104 thr",   "Intel GPU", "dc_gpu",     "Xeon Max",  "64",  "fit")]
     o["gpu_vs_cpu"] = {}
