@@ -423,7 +423,11 @@ gpu_res_usage() {
          r=0; st=0
          if (match($0,/REG:[0-9]+/))   r  = substr($0,RSTART+4,RLENGTH-4)+0
          if (match($0,/STACK:[0-9]+/)) st = substr($0,RSTART+6,RLENGTH-6)+0
-         if (f ~ /column_kernel_[0-9]+_gpu/) { br=r; bs=st }
+         # Match the _gpu SUFFIX and take the biggest frame, not a specific
+         # procedure name: pinning it to `column_kernel` returned nothing the
+         # moment the loop was refactored into ks_column_loop, and a blank
+         # column is indistinguishable from "cuobjdump is not installed".
+         if (f ~ /_gpu$/ && st > bs) { br=r; bs=st }
       }
       END{ if (br+0>0) print br, bs }'
 }
