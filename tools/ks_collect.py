@@ -231,7 +231,7 @@ def main():
     PAIRS = [("NVIDIA GH200 / Grace, 72 threads",        "GH200",     "dc_gpu",     "Grace",     "473", "prod"),
              ("AMD MI250X, 1 GCD / EPYC 7A53, 56 thr",   "MI250X",    "dc_gpu",     "EPYC 7A53", "473", "prod"),
              ("NVIDIA V100 / Broadwell, 40 threads",     "V100",      "dc_gpu_acc", "Broadwell", "64",  "fit"),
-             ("Intel Max, 1 tile / Xeon Max, 104 thr",   "Intel GPU", "dc_gpu",     "Xeon Max",  "64",  "fit")]
+             ("Intel Max, 1 tile / Xeon Max, 104 thr",   "Intel GPU", "dc_gpu",     "Xeon Max",  "473", "prod")]
     o["gpu_vs_cpu"] = {}
     o["gpu_vs_cpu_samegrid"] = {}
     for lab, gdev, gmode, cdev, cnxp, csp in PAIRS:
@@ -262,14 +262,20 @@ def main():
     # Grace carries stack_policy=prod because that is the only production-grid
     # CPU sweep -- legitimate here, and checked: on Grace prod/fit is 0.997-1.010
     # at every depth, i.e. the frame axis that costs AMD 3x costs this CPU nothing.
-    PORT = [("NVIDIA GH200, full GPU", "GH200", "dc_gpu", "fit", None),
-            ("Grace CPU, 72 cores", "Grace", "dc_multicore", "prod", "72"),
-            ("AMD MI250X, 1 GCD", "MI250X", "dc_gpu", "fit", None),
-            ("NVIDIA V100, full GPU", "V100", "dc_gpu_acc", "fit", None),
-            ("Intel Max, 1 tile", "Intel GPU", "dc_gpu", "fit", None)]
+    # Three KINDS on one axis: hand-written CUDA, the same do concurrent source,
+    # and a whole CPU socket. Only NVIDIA has a CUDA twin -- MI250X and Intel Max
+    # are do-concurrent-only by design, so the panel shows what exists rather
+    # than implying a missing measurement.
+    PORT = [("NVIDIA GH200, CUDA",          "GH200",     "cuda_faithful", "fit", None, "cuda"),
+            ("NVIDIA GH200, do concurrent", "GH200",     "dc_gpu",        "fit", None, "gpu"),
+            ("Grace CPU, 72 cores",         "Grace",     "dc_multicore",  "prod", "72", "cpu"),
+            ("AMD MI250X, 1 GCD",           "MI250X",    "dc_gpu",        "fit", None, "gpu"),
+            ("NVIDIA V100, CUDA",           "V100",      "cuda_faithful", "fit", None, "cuda"),
+            ("NVIDIA V100, do concurrent",  "V100",      "dc_gpu_acc",    "fit", None, "gpu"),
+            ("Intel Max, 1 tile",           "Intel GPU", "dc_gpu",        "fit", None, "gpu")]
     o["portability"] = {lab: [at(d, m, sp, nz, t) for nz in NZ]
-                        for lab, d, m, sp, t in PORT}
-    o["portability_is_cpu"] = {lab: m == "dc_multicore" for lab, d, m, sp, t in PORT}
+                        for lab, d, m, sp, t, k in PORT}
+    o["portability_kind"] = {lab: k for lab, d, m, sp, t, k in PORT}
     d = {}
     for r in rows:
         if r["mode"] in ("dc_serial", "serial_do") and r["stack_policy"] == "fit" and r["nxp"] == "64":

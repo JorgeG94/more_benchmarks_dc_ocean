@@ -184,9 +184,8 @@ def build(D, T, dark):
     ax.minorticks_off()
     ax.fill_between(nz, 0.5, 1, color=T["ink3"], alpha=0.06, zorder=0)
     finish(ax, T, "Single GPU speedup versus whole CPU",
-           "same do concurrent source on both sides; only the GH200/Grace pair is measured\n"
-           "at the production grid on BOTH sides — the rest run the CPU at 64², which "
-           "flatters it by ~10–18%",
+           "same do concurrent source on both sides; GPU at 473×297 (145,137 columns)\n"
+           "† CPU measured at 64² rather than the production grid",
            "nz", "GPU ÷ whole-CPU-socket", nz)
     ax.annotate("GPU slower", (nz[0], 0.985), xytext=(6, -14), textcoords="offset points",
                 ha="left", fontsize=9, color=T["ink3"], style="italic")
@@ -227,8 +226,8 @@ def build(D, T, dark):
     ax.get_yaxis().set_major_formatter(FuncFormatter(lambda v, p: f"{v:g}×"))
     ax.minorticks_off()
     finish(ax, T, "Cost ratio per GPU (MI250X affected by stack max constant)",
-           "NZ_STACK_MAX is a COMPILE-TIME bound, so it sets the per-thread stack\n"
-           "frame whatever the runtime nz — identical work, identical answers",
+           "473×297 production grid. NZ_STACK_MAX is a COMPILE-TIME bound, so it sets the\n"
+           "per-thread stack frame whatever the runtime nz — identical work, identical answers",
            "nz", "cost ratio, production ÷ fitted", nz)
     # ABOVE the baseline, not below it: at (0, -22) this note landed on the x
     # tick labels and across the three lines it is describing.
@@ -256,8 +255,8 @@ def build(D, T, dark):
     plot_lines(ax, T, nzd, se, baseline=1.0)
     ax.set_ylim(0.9, 1.12)
     finish(ax, T, "Cost ratio per GPU, deep columns only (nz \u2265 50)",
-           "linear scale: by nz=50 the MI250X frame penalty is gone\n"
-           "and all four agree to within a few percent",
+           "473×297 production grid, linear scale: by nz=50 the MI250X frame\n"
+           "penalty is gone and all four agree to within a few percent",
            "nz", "cost ratio, production \u00f7 fitted", nzd)
     lg = ax.legend(loc="upper left", ncols=4, fontsize=9, title="cost ratio  =  t(NZ_STACK_MAX=128)  ÷  t(NZ_STACK_MAX=nz+1)")
     lg.get_title().set_fontsize(9)
@@ -290,8 +289,8 @@ def build(D, T, dark):
     plot_lines(ax, T, nz, se, baseline=1.0)
     ax.set_ylim(0.82, 1.10)
     finish(ax, T, "do concurrent on the CPU (serial / threaded) effects",
-           "serial do concurrent against plain nested do loops, no offload involved\n"
-           "1.0 = identical; below 1.0 = do concurrent is slower",
+           "64×64 grid (4,900 columns), no offload involved — both sides at the SAME grid,\n"
+           "so grid effects cancel. 1.0 = identical; below 1.0 = do concurrent is slower",
            "nz", "speedup over serial do", nz)
     # No end labels: they repeat the legend verbatim and crowd the converged tail.
     ax.legend(loc="upper right", ncols=2, fontsize=8.5)
@@ -321,7 +320,8 @@ def build(D, T, dark):
     ax.set_ylim(0.9, 150)
     ticks = [1, 2, 4, 8, 16, 32, 72, 104]
     finish(ax, T, "CPU scaling",
-           "strong scaling at nz=30, one socket; dashed line is ideal (speedup = threads)",
+           "nz=30, 64×64 grid (4,900 columns), one socket; dashed line is ideal (speedup = threads)\n"
+           "at 473×297 Grace falls to 0.69 efficiency while EPYC and Xeon Max rise — the grid matters",
            "threads", "speedup vs 1 thread", ticks, logx=True)
     ax.minorticks_off()
     ax.annotate("ideal", (xs[-1], xs[-1]), xytext=(-4, 9), textcoords="offset points",
@@ -362,31 +362,29 @@ def build(D, T, dark):
     ax.legend(loc="upper right", ncols=1)
     figs["fig6_node"] = f
 
-    # 7 - performance portability: ONE source, every target it ran on.
-    # A bar chart, not lines: this is a magnitude comparison across ~5 named
-    # things at one depth, which is exactly what bars are for. Depth is nz=50, a
-    # real ocean-model layer count and the middle of the swept range.
-    # Colour encodes the one distinction that carries the finding -- accelerator
-    # vs CPU socket -- and NOT device identity, which the axis labels already
-    # give. Five categorical hues here would be decoration.
-    f, ax = plt.subplots(figsize=(7.6, 4.0))
-    j = nz.index(50)
-    bars = sorted(((v[j], k) for k, v in D["portability"].items() if v[j]))
+    # 7 - performance portability: one source, every target, at the DEEPEST
+    # column count measured. nz=100 rather than a mid-depth point because the
+    # do-concurrent-vs-CUDA gap widens with depth, so this is the least
+    # flattering depth for the portable version -- the honest place to make the
+    # claim. Colour encodes KIND (CUDA / do concurrent / CPU socket), not device
+    # identity, which the axis labels already carry.
+    f, ax = plt.subplots(figsize=(7.8, 4.4))
+    jz = nz.index(100)
+    bars = sorted((v[jz], k) for k, v in D["portability"].items() if v[jz])
+    KC = {"cuda": S[2], "gpu": S[0], "cpu": S[1]}
     ys = range(len(bars))
-    cols = [S[1] if D["portability_is_cpu"][k] else S[0] for _, k in bars]
-    ax.barh(list(ys), [v for v, _ in bars], height=0.52, color=cols, zorder=3)
+    cols = [KC[D["portability_kind"][k]] for _, k in bars]
+    ax.barh(list(ys), [v for v, _ in bars], height=0.6, color=cols, zorder=3)
     ax.set_yticks(list(ys))
-    ax.set_yticklabels([k for _, k in bars], fontsize=10)
-    ax.invert_yaxis()                       # fastest at the top
+    ax.set_yticklabels([k for _, k in bars], fontsize=9.5)
+    ax.invert_yaxis()
     top = max(v for v, _ in bars)
-    ax.set_xlim(0, top * 1.20)
-    for y, (v, _) in zip(ys, bars):         # direct value labels, in ink
+    ax.set_xlim(0, top * 1.18)
+    for y, (v, _) in zip(ys, bars):
         ax.annotate(f"{v:,.0f}", (v, y), xytext=(7, 0), textcoords="offset points",
                     va="center", ha="left", fontsize=9.5, color=T["ink"],
                     fontweight="600")
     ax.grid(axis="y", visible=False)
-    # Round tick values, not top/4: an axis reading 0, 161, 322, 483 makes the
-    # reader do arithmetic to place a bar, which is the axis's job.
     step = 10 ** int(math.floor(math.log10(top / 4)))
     for m in (1, 2, 2.5, 5, 10):
         if top / 4 <= step * m:
@@ -394,13 +392,15 @@ def build(D, T, dark):
             break
     ticks = [int(t) for t in range(0, int(top) + int(step), int(step))]
     finish(ax, T, "Do concurrent performance portability",
-           "the same do concurrent kernel at nz=50, production 473\u00d7297, "
-           "frame fitted \u2014 lower is better",
+           "nz=100, production 473\u00d7297 (145,137 columns), frame fitted \u2014 lower is better\n"
+           "MI250X and Intel Max have no hand-written twin: do concurrent is the only lane there",
            "ns per column", "", ticks)
     ax.get_xaxis().set_major_formatter(FuncFormatter(lambda v, p: f"{int(v):,}"))
-    ax.annotate("a whole CPU socket, second", (bars[1][0], 1), xytext=(52, 0),
-                textcoords="offset points", ha="left", va="center", fontsize=9,
-                color=T["ink3"], style="italic")
+    hs = [plt.Line2D([0], [0], color=KC[k], lw=7) for k in ("cuda", "gpu", "cpu")]
+    # Upper right: bars are sorted ascending so the short ones are at the top and
+    # that corner is empty -- lower right sat on the two longest bars.
+    ax.legend(hs, ["hand-written CUDA", "do concurrent, GPU", "do concurrent, CPU socket"],
+              loc="upper right", ncols=1, fontsize=9)
     figs["fig7_portability"] = f
 
     for f in figs.values():

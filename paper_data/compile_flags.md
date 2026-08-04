@@ -117,6 +117,12 @@ NZ_STACK_MAX swept: 11,26,31,51,76,101,128
 **dc_multicore** — `ifx` 2026.0.0
 
 ```
+-O3 -I../common -DKS_NO_NEWTON -qopenmp
+```
+NZ_STACK_MAX swept: 128
+
+
+```
 -O3 -I../common -qopenmp
 ```
 NZ_STACK_MAX swept: 11,26,31,51,76,101,128
@@ -356,4 +362,4 @@ NZ_STACK_MAX swept: 11,26,31,51,76,101,128
 NZ_STACK_MAX swept: 11,26,31,51,76,101,128
 
 
-> 8 lane(s) show more than one compile line — see above.
+> 9 lane(s) show more than one compile line — see above.
