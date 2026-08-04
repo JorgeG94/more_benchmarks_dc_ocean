@@ -12,7 +12,7 @@ cd "$(cd "$(dirname "$0")/.." && pwd)"
 
 # ---------------------------------------------------------------------------
 # MACHINE FACTS
-#   module load oneapi   (ifx >= 2024; 2025.3 and 2026.0 both known to work)
+#   Nothing to load -- ifx is on PATH by default. (2025.3 and 2026.0 both work.)
 # ifx exposed a real conformance bug in this code once: dc_main.F90 declared
 # locals named `grid` and `ks` while USE-ing modules of those names. nvfortran
 # and gfortran accept it, ifx rejects with #6450. Fixed -- noted so a rebuild
@@ -41,7 +41,7 @@ run() { echo; echo "### $1"; shift; env "$@" ./tools/ks_min.sh $DRY; }
 want() { case " $PHASES " in *" $1 "*) return 0;; *) return 1;; esac; }
 
 echo "=== Aurora end-to-end ($FC): $PHASES ==="
-command -v "$FC" >/dev/null || { echo "no $FC on PATH -- module load oneapi"; exit 1; }
+command -v "$FC" >/dev/null || { echo "no $FC on PATH (expected by default on Aurora)"; exit 1; }
 
 # 1. the GPU depth sweep, both frame settings. The frame axis is cheap to carry
 #    and it is the one place AMD and NVIDIA disagree violently, so measure it

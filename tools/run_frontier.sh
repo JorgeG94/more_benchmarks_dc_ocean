@@ -12,11 +12,19 @@ cd "$(cd "$(dirname "$0")/.." && pwd)"
 
 # ---------------------------------------------------------------------------
 # MACHINE FACTS
-#   module load PrgEnv-amd    (or: module load rocm; the compiler is amdflang)
-# The compiler is amdflang, NOT flang -- config.mk knows every name LLVM flang
-# ships under, but the offload flags below must name the arch explicitly:
-# rocminfo on a login node may report nothing and gfx90a would be assumed anyway.
+#   module load rocm/7.13.0
+# The compiler is amdflang, NOT flang. Newer ROCm ships it as `amdflang-new`, so
+# take whichever is on PATH -- config.mk recognises both (a silent fall-through
+# to the unknown-compiler branch once cost an entire AMD column, with the wrong
+# module flags and no offload lane at all). The offload flags below name the
+# arch EXPLICITLY: rocminfo on a login node may report nothing, and gfx90a would
+# then be assumed silently -- right for MI250X, wrong for MI300.
 # ---------------------------------------------------------------------------
+if [ -z "${FC:-}" ]; then
+   for c in amdflang amdflang-new flang-new flang; do
+      command -v "$c" >/dev/null 2>&1 && { FC=$c; break; }
+   done
+fi
 export FC=${FC:-amdflang}
 AMD_ARCH=${AMD_ARCH:-gfx90a}       # MI250X. MI300 is gfx942.
 GPU_DEV="MI250X"                   # ONE GCD -- that is what a rank gets
@@ -41,7 +49,7 @@ run() { echo; echo "### $1"; shift; env "$@" ./tools/ks_min.sh $DRY; }
 want() { case " $PHASES " in *" $1 "*) return 0;; *) return 1;; esac; }
 
 echo "=== Frontier end-to-end ($FC, $AMD_ARCH): $PHASES ==="
-command -v "$FC" >/dev/null || { echo "no $FC on PATH -- module load PrgEnv-amd"; exit 1; }
+command -v "$FC" >/dev/null || { echo "no $FC on PATH -- module load rocm/7.13.0"; exit 1; }
 
 # 1. the GPU depth sweep at both frame settings.
 #    NZ_STACK_MAX IS THE WHOLE BALLGAME HERE and the NVIDIA-derived "the frame
