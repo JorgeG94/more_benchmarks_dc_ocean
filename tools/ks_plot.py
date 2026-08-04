@@ -269,13 +269,19 @@ def build(D, T, dark):
     if missing or unlisted:
         raise SystemExit(f"fig4 dc_cost series mismatch:\n  in `order`, absent from the data: "
                          f"{missing}\n  measured, absent from `order`: {unlisted}")
-    se = [(k, D["dc_cost"][k], S[1] if i == 0 else S[2] if i == 1 else T["ctx"], i >= 2)
+    # INVERTED to a speedup. D["dc_cost"] is dc_serial / serial_do in TIME, so a
+    # value above 1 there means do concurrent was SLOWER. Plotted as
+    # serial_do / dc_serial instead, >1 is genuinely faster and the axis label
+    # means what it says.
+    se = [(k, [(1.0 / v if v else None) for v in D["dc_cost"][k]],
+           S[1] if i == 0 else S[2] if i == 1 else T["ctx"], i >= 2)
           for i, k in enumerate(order)]
     plot_lines(ax, T, nz, se, baseline=1.0)
-    ax.set_ylim(0.94, 1.22)
+    ax.set_ylim(0.82, 1.07)
     finish(ax, T, "do concurrent on the CPU (serial / threaded) effects",
-           "serial do concurrent ÷ plain nested do loops, no offload involved",
-           "nz", "dc_serial ÷ serial_do", nz)
+           "serial do concurrent against plain nested do loops, no offload involved\n"
+           "1.0 = identical; below 1.0 = do concurrent is slower",
+           "nz", "speedup over serial do", nz)
     # No end labels: they repeat the legend verbatim and crowd the converged tail.
     ax.legend(loc="upper right", ncols=2, fontsize=8.5)
     figs["fig4_dc_cost"] = f
