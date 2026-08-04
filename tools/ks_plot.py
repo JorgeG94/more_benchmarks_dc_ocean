@@ -221,14 +221,17 @@ def build(D, T, dark):
     ax.get_yaxis().set_major_formatter(FuncFormatter(lambda v, p: f"{v:g}×"))
     ax.minorticks_off()
     finish(ax, T, "Cost ratio per GPU (MI250X affected by stack max constant)",
-           "NZ_STACK_MAX=128 (production) ÷ fitted to nz+1 — identical work, identical answers",
+           "NZ_STACK_MAX is a COMPILE-TIME bound, so it sets the per-thread stack\n"
+           "frame whatever the runtime nz — identical work, identical answers",
            "nz", "cost ratio, production ÷ fitted", nz)
     # ABOVE the baseline, not below it: at (0, -22) this note landed on the x
     # tick labels and across the three lines it is describing.
     ax.annotate("V100, GH200 and Intel Max sit on 1.0", (nz[-1], 1.0),
                 textcoords="offset points", xytext=(-4, 34), ha="right",
                 fontsize=9, color=T["ink3"], style="italic")
-    ax.legend(loc="upper right", ncols=2)
+    lg = ax.legend(loc="upper right", ncols=2, title="cost ratio  =  t(NZ_STACK_MAX=128)  ÷  t(NZ_STACK_MAX=nz+1)")
+    lg.get_title().set_fontsize(9)
+    lg.get_title().set_color(T["ink2"])
     figs["fig3_frame"] = f
 
     # 3a — the same ratio from nz=50 on, LINEAR. Once MI250X has converged, the
@@ -250,7 +253,9 @@ def build(D, T, dark):
            "linear scale: by nz=50 the MI250X frame penalty is gone\n"
            "and all four agree to within a few percent",
            "nz", "cost ratio, production \u00f7 fitted", nzd)
-    ax.legend(loc="upper left", ncols=4, fontsize=9)
+    lg = ax.legend(loc="upper left", ncols=4, fontsize=9, title="cost ratio  =  t(NZ_STACK_MAX=128)  ÷  t(NZ_STACK_MAX=nz+1)")
+    lg.get_title().set_fontsize(9)
+    lg.get_title().set_color(T["ink2"])
     figs["fig3a_frame_deep"] = f
 
     # 4 — DC costs nothing on CPU; emphasis on the flang family
@@ -325,7 +330,23 @@ def build(D, T, dark):
     f, ax = plt.subplots(figsize=(7.6, 4.3))
     se = [("do concurrent", D["node_gh200"], S[1], False),
           ("CUDA", D["node_gh200_cuda"], S[0], False)]
+    # THE BAND IS THE FINDING, not an uncertainty. Its vertical extent at each nz
+    # is exactly what hand-CUDA buys over do concurrent on the same kernel, same
+    # inputs, same device -- shading it makes that gap a thing you read off the
+    # chart instead of subtracting two curves by eye. Widening with depth IS the
+    # result: 1.39x at nz=10 growing to 1.74x at nz=100.
+    dcv, cuv = D["node_gh200"], D["node_gh200_cuda"]
+    ax.fill_between(nz, dcv, cuv, color=S[0], alpha=0.10, zorder=1, lw=0)
     plot_lines(ax, T, nz, se, baseline=1.0)
+    for j in (0, len(nz) - 1):
+        ax.annotate(f"{cuv[j] / dcv[j]:.2f}×", (nz[j], (dcv[j] + cuv[j]) / 2),
+                    xytext=(9 if j == 0 else -9, 0), textcoords="offset points",
+                    ha="left" if j == 0 else "right", va="center",
+                    fontsize=9.5, fontweight="600", color=S[0])
+    ax.annotate("shaded band = what CUDA buys over do concurrent",
+                (nz[2], (dcv[2] + cuv[2]) / 2), xytext=(6, 26),
+                textcoords="offset points", ha="left", fontsize=9,
+                color=T["ink3"], style="italic")
     ax.set_ylim(0, None)
     finish(ax, T, "GH200: Grace versus H200",
            "both sides at production 473\u00d7297, nvfortran, frame at NZ_STACK_MAX=128",
