@@ -58,8 +58,16 @@ ifeq ($(notdir $(FC)),nvfortran)
   # DATA=none: run do concurrent across CPU cores
   DC_HOST_FLAGS ?= -stdpar=multicore
   MODFLAG       ?= -module
-else ifeq ($(notdir $(FC)),gfortran)
+else ifneq ($(filter gfortran%,$(notdir $(FC))),)
+  # Prefix match, not `ifeq ...,gfortran`: Homebrew and MacPorts install the
+  # binary VERSIONED -- `gfortran-15`, `gfortran-mp-15` -- and an exact test drops
+  # those into the unknown-compiler branch below. That branch happens to be right
+  # for gfortran today, so the bug would only surface the day the two diverge.
+  # (`local()` locality specs need gfortran >= 15; older ones build serialdo only.)
   FFLAGS_BASE   ?= -O3
+  # No DC_HOST_FLAGS: gfortran does not map `do concurrent` onto threads, so
+  # dc_multicore would be dc_serial wearing a different label. Leave it empty --
+  # the serial lane is the honest one for this compiler.
   DC_HOST_FLAGS ?=
   MODFLAG       ?= -J
 else ifeq ($(notdir $(FC)),ifx)

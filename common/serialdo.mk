@@ -37,10 +37,23 @@ sd_src = $(firstword $(wildcard serialdo/$(1)) $(wildcard $(1)) $(wildcard drive
 $(SDBLD):
 	@mkdir -p $@
 
+# Stamp the resolved compiler + flags into the build dir and make every object
+# depend on it. `make` keys on TIMESTAMPS, so without this a second build with a
+# different FC reuses the first one's objects -- and, worse, its .mod files:
+#   make serialdo               # nvfortran, writes build/serialdo/constants.mod
+#   make serialdo FC=gfortran   # "constants.mod ... is not a GNU Fortran module"
+# which is the FRIENDLY failure. The quiet one is two compilers' objects linked
+# into one binary that runs and reports a number. The stamp is only touched when
+# its contents change, so a repeated identical build still does nothing.
+$(SDBLD)/.flags: ; @true
+$(shell mkdir -p $(SDBLD) 2>/dev/null; printf '%s\n' '$(FC) $(SD_FFLAGS)' > $(SDBLD)/.flags.new; \
+        cmp -s $(SDBLD)/.flags.new $(SDBLD)/.flags 2>/dev/null || mv -f $(SDBLD)/.flags.new $(SDBLD)/.flags; \
+        rm -f $(SDBLD)/.flags.new)
+
 # one explicit rule per source so the right file is a real prerequisite
 # (rebuilds when either the serialdo/ copy or the header changes).
 define SD_RULE
-$(SDBLD)/$(basename $(1)).o: $(call sd_src,$(1)) ../common/directives.h | $(SDBLD)
+$(SDBLD)/$(basename $(1)).o: $(call sd_src,$(1)) ../common/directives.h $(SDBLD)/.flags | $(SDBLD)
 	$$(FC) $$(SD_FFLAGS) $$(MODFLAG) $(SDBLD) -c $$< -o $$@
 endef
 $(foreach s,$(SD_BASES),$(eval $(call SD_RULE,$(s))))
@@ -58,9 +71,16 @@ run-serialdo: serialdo
 # bit-identity gate (runs where the DC source compiles -- e.g. nvfortran): the
 # do-concurrent build dumps a reference field, the serial-do build cross-checks
 # it (max rel diff < 1e-12). Proves the loop rewrite is numerically inert.
-SD_REF_BIN ?= dc_acc$(SD_TAG)
+# SD_REF_DATA picks WHICH do-concurrent build produces the reference. `acc` (the
+# GPU) is the interesting cross-check where nvfortran exists; `none` is the
+# CPU do-concurrent build, which is what a machine with only gfortran/ifx has --
+# and it still proves the point, since the claim under test is that the loop
+# rewrite is numerically inert, not that a GPU is involved:
+#   make verify-serialdo FC=gfortran-15 SD_REF_DATA=none
+SD_REF_DATA ?= acc
+SD_REF_BIN ?= dc_$(SD_REF_DATA)$(SD_TAG)
 verify-serialdo:
-	@$(MAKE) --no-print-directory dc DATA=acc
+	@$(MAKE) --no-print-directory dc DATA=$(SD_REF_DATA)
 	@DC_DUMP=serialdo_ref.bin ./$(SD_REF_BIN) $(SD_ARGS)
 	@$(MAKE) --no-print-directory serialdo
 	@DC_REF=serialdo_ref.bin ./$(SDBIN) $(SD_ARGS)

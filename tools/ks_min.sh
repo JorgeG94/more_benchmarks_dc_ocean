@@ -26,6 +26,10 @@ set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$here/.." && pwd)"
 KDIR="$REPO/kappa_shear"
+# GNU make, under whatever name it has. Apple ships GNU make 3.81 (2006) as
+# `make`; `brew install make` provides a current one as `gmake`. Overridable:
+#   MAKE=gmake ./tools/ks_min.sh
+MAKE="${MAKE:-make}"
 CONF="${KS_MIN_CONF:-$here/ks_min.conf}"
 [ -f "$CONF" ] || { echo "missing config: $CONF" >&2; exit 1; }
 # shellcheck disable=SC1090
@@ -106,7 +110,7 @@ set_cmp_args() {    # $1 = nzstack, $2 = counters
            BCOPY="$BCOPY" OPT_NZMAX="$1")
    MKTARGET=cmp; BINVAR=CMPBIN
 }
-mkprint() { ( cd "$KDIR" && make -s "print-$1" "${MKVARS[@]}" 2>/dev/null ); }
+mkprint() { ( cd "$KDIR" && "$MAKE" -s "print-$1" "${MKVARS[@]}" 2>/dev/null ); }
 
 # ---------------------------------------------------------------------------
 # run one binary; echo stdout. No lock, no idle gate, no device query.
@@ -146,9 +150,33 @@ gpu_res_usage() {   # $1 = binary (relative to KDIR); prints "REG STACK"
       END{ if (br+0>0) print br, bs }'
 }
 
-declare -A R
-parse_line() { local t; R=(); for t in $1; do case "$t" in *=*) R[${t%%=*}]="${t#*=}";; esac; done; [ -n "${R[ms]:-}" ]; }
-median() { sort -g | awk '{v[NR]=$1} END{ if(NR==0){print ""; exit} print (NR%2)? v[(NR+1)/2] : (v[NR/2]+v[NR/2+1])/2 }'; }
+# FIELD ACCESS WITHOUT ASSOCIATIVE ARRAYS. stock macOS ships bash 3.2, which has
+# no `declare -A` -- the script would die at parse time before running anything.
+# RESULT lines are `key=value` tokens, so pull one field at a time instead of
+# building a map.
+# One pass over the line into plain variables -- no subprocesses, no arrays.
+R_KEYS="impl ms variant lanes bcopy nx ny ncols nwet nz reps kd_sum kd_min kd_max regs local_b it_outer it_inner"
+parse_line() {
+   local t k v
+   for k in $R_KEYS; do eval "R_$k="; done
+   for t in $1; do
+      case "$t" in *=*) ;; *) continue;; esac
+      k=${t%%=*}; v=${t#*=}
+      case " $R_KEYS " in *" $k "*) eval "R_$k=\$v";; esac
+   done
+   [ -n "$R_ms" ]
+}
+# Field, with an optional default. The `${2:-}` is load-bearing: under `set -u`
+# a bare `$2` inside the eval is an unbound variable, the eval aborts, and rv
+# prints NOTHING -- so every one-argument call silently emitted an empty CSV
+# column while the two-argument calls looked fine.
+rv() { local _d=${2:-}; eval "printf '%s' \"\${R_$1:-\$_d}\""; }
+# min/median in awk, not `sort -g`: BSD sort (macOS) is not dependable for
+# general-numeric, and these values are in E notation.
+amin() { awk '{if(NR==1||$1<m)m=$1} END{if(NR)printf "%.10E", m}'; }
+amed() { awk '{v[NR]=$1} END{ if(!NR)exit; n=asort_done=0;
+          for(i=1;i<=NR;i++)for(j=i+1;j<=NR;j++)if(v[j]<v[i]){t=v[i];v[i]=v[j];v[j]=t}
+          printf "%.10E", (NR%2)? v[(NR+1)/2] : (v[NR/2]+v[NR/2+1])/2 }'; }
 
 NROWS=0
 emit() {  # $1 impl $2 status $3 ms_min $4 ms_med $5 nspc $6 it_out $7 it_in $8 nzs $9 spol $10 threads
@@ -156,14 +184,14 @@ emit() {  # $1 impl $2 status $3 ms_min $4 ms_med $5 nspc $6 it_out $7 it_in $8 
    [ "$1" = dc ] && mode_out="$MODE"
    [ "${USING_CMP:-0}" = 1 ] && { launcher=cmp; [ "$1" = dc ] && mode_out=dc_gpu; }
    printf '%s,%s,%s,%s,%s,%s,%s,"%s","%s",%s,%s,%s,%s,%s,%s,%s,%s,"%s",%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-     "nz" "$mode_out" "$1" "$launcher" "${R[variant]:-faithful}" "${R[lanes]:-1}" \
+     "nz" "$mode_out" "$1" "$launcher" "$(rv variant faithful)" "$(rv lanes 1)" \
      "$FC" "$(_q "$FCVER")" "$(_q "$(mkprint BASE_FFLAGS) $(mkprint DC_MODE_FLAGS)")" \
-     "$9" "prod" "$8" "${R[bcopy]:-0}" "$8" "0" \
+     "$9" "prod" "$8" "$(rv bcopy 0)" "$8" "0" \
      "${10}" "close" "$(_q "$DEVICE")" "$GPU_ARCH_LABEL" \
-     "$NXP" "$NYP" "${R[nx]:-}" "${R[ny]:-}" "${R[ncols]:-}" "${R[nwet]:-}" \
-     "${R[nz]:-}" "$LAND_PCT" "${R[reps]:-}" "$KS_WARM" "$NRUN" \
+     "$NXP" "$NYP" "$(rv nx)" "$(rv ny)" "$(rv ncols)" "$(rv nwet)" \
+     "$(rv nz)" "$LAND_PCT" "$(rv reps)" "$KS_WARM" "$NRUN" \
      "$3" "$4" "$5" "$6" "$7" \
-     "${R[kd_sum]:-}" "${R[kd_min]:-}" "${R[kd_max]:-}" "${R[regs]:-}" "${R[local_b]:-}" \
+     "$(rv kd_sum)" "$(rv kd_min)" "$(rv kd_max)" "$(rv regs)" "$(rv local_b)" \
      "$2" "$GHASH" "$HOSTN" "$TS" >> "$CSV"
    NROWS=$((NROWS+1))
 }
@@ -179,26 +207,27 @@ measure() {   # $1 nz, $2 nzstack, $3 stack_policy, $4 threads
 
    if [ "${USING_CMP:-0}" = 1 ]; then set_cmp_args "$nzs" 0; else set_make_args "$nzs" 0; fi
    bin="$(mkprint "$BINVAR")"
-   if ! ( cd "$KDIR" && make "$MKTARGET" "${MKVARS[@]}" ) >"$KDIR/.ks_min_build.log" 2>&1; then
+   if ! ( cd "$KDIR" && "$MAKE" "$MKTARGET" "${MKVARS[@]}" ) >"$KDIR/.ks_min_build.log" 2>&1; then
       echo "    $label  BUILD_FAIL (see kappa_shear/.ks_min_build.log)"
-      R=(); emit dc BUILD_FAIL NaN NaN NaN NaN NaN "$nzs" "$spol" "$thr"; return
+      parse_line ""; emit dc BUILD_FAIL NaN NaN NaN NaN NaN "$nzs" "$spol" "$thr"; return
    fi
 
-   local -A MSL RLINE; local order=""
+   local order=""
+   for _i in dc cuda_faithful cuda_opt; do eval "MSL_$_i=; RLINE_$_i="; done
    for i in $(seq 1 "$NRUN"); do
       out=$(run_bin "$bin" "$nz" 0 "$KS_WARM" "$thr" "$nzs")
       if [ $? -ne 0 ]; then
          echo "    $label  RUN_FAIL"; printf '%s\n' "$out" > "$KDIR/.ks_min_run.log"
-         R=(); emit dc RUN_FAIL NaN NaN NaN NaN NaN "$nzs" "$spol" "$thr"; return
+         parse_line ""; emit dc RUN_FAIL NaN NaN NaN NaN NaN "$nzs" "$spol" "$thr"; return
       fi
       while IFS= read -r line; do
          parse_line "$line" || continue
-         imp="${R[impl]:-dc}"; msv="${R[ms]}"
+         imp="$(rv impl dc)"; msv="$R_ms"
          case " $order " in *" $imp "*) ;; *) order="$order $imp";; esac
-         MSL[$imp]="${MSL[$imp]:-} $msv"; RLINE[$imp]="$line"
+         eval "MSL_$imp=\"\$MSL_$imp $msv\"; RLINE_$imp=\$line"
       done < <(printf '%s\n' "$out" | grep '^RESULT ')
    done
-   [ -n "$order" ] || { echo "    $label  NO_RESULT"; R=(); \
+   [ -n "$order" ] || { echo "    $label  NO_RESULT"; parse_line ""; \
         emit dc NO_RESULT NaN NaN NaN NaN NaN "$nzs" "$spol" "$thr"; return; }
 
    # counters pass: integers only, never timed (this kernel is register-bound)
@@ -206,10 +235,10 @@ measure() {   # $1 nz, $2 nzstack, $3 stack_policy, $4 threads
    if [ "$COUNTERS" = on ]; then
       if [ "${USING_CMP:-0}" = 1 ]; then set_cmp_args "$nzs" 1; else set_make_args "$nzs" 1; fi
       local cbin; cbin="$(mkprint "$BINVAR")"
-      if ( cd "$KDIR" && make "$MKTARGET" "${MKVARS[@]}" ) >/dev/null 2>&1; then
+      if ( cd "$KDIR" && "$MAKE" "$MKTARGET" "${MKVARS[@]}" ) >/dev/null 2>&1; then
          while IFS= read -r line; do
             parse_line "$line" || continue
-            [ "${R[impl]:-dc}" = dc ] && { dc_ito="${R[it_outer]}"; dc_iti="${R[it_inner]}"; }
+            [ "$(rv impl dc)" = dc ] && { dc_ito="$R_it_outer"; dc_iti="$R_it_inner"; }
          done < <(run_bin "$cbin" "$nz" 1 0 "$thr" "$nzs" | grep '^RESULT ')
       fi
       if [ "${USING_CMP:-0}" = 1 ]; then set_cmp_args "$nzs" 0; else set_make_args "$nzs" 0; fi
@@ -222,14 +251,15 @@ measure() {   # $1 nz, $2 nzstack, $3 stack_policy, $4 threads
 
    local mn md nspc ito iti
    for imp in $order; do
-      mn=$(printf '%s\n' ${MSL[$imp]} | sort -g | head -1)
-      md=$(printf '%s\n' ${MSL[$imp]} | median)
-      parse_line "${RLINE[$imp]}" || continue
-      nspc=$(awk -v m="$mn" -v n="${R[ncols]:-1}" 'BEGIN{printf "%.6f", m*1e6/n}')
-      ito="${R[it_outer]:-}"; iti="${R[it_inner]:-}"
+      eval "_ms=\$MSL_$imp; _ln=\$RLINE_$imp"
+      mn=$(printf '%s\n' $_ms | amin)
+      md=$(printf '%s\n' $_ms | amed)
+      parse_line "$_ln" || continue
+      nspc=$(awk -v m="$mn" -v n="$(rv ncols 1)" 'BEGIN{printf "%.6f", m*1e6/n}')
+      ito="$(rv it_outer)"; iti="$(rv it_inner)"
       [ "$imp" = dc ] && [ -n "$dc_iti" ] && { ito="$dc_ito"; iti="$dc_iti"; }
       # the Fortran driver cannot report its own kernel's registers; cuobjdump can
-      [ "$imp" = dc ] && [ -n "$DC_REGS" ] && { R[regs]="$DC_REGS"; R[local_b]="$DC_STACK"; }
+      [ "$imp" = dc ] && [ -n "$DC_REGS" ] && { R_regs="$DC_REGS"; R_local_b="$DC_STACK"; }
       printf '    %s  %-14s %12s ms  %11s ns/col  it=%s\n' "$label" "$imp" "$mn" "$nspc" "${iti:-?}"
       emit "$imp" OK "$mn" "$md" "$nspc" "$ito" "$iti" "$nzs" "$spol" "$thr"
    done
