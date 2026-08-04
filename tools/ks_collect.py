@@ -276,6 +276,31 @@ def main():
     o["portability"] = {lab: [at(d, m, sp, nz, t) for nz in NZ]
                         for lab, d, m, sp, t, k in PORT}
     o["portability_kind"] = {lab: k for lab, d, m, sp, t, k in PORT}
+
+    # GRID SWEEP: ns/col against the number of columns actually solved, at fixed
+    # depth. This is the one axis the study asserts but never measured -- CLAUDE.md
+    # says "small grids hide the launch-amortisation gap" and every GPU number
+    # here is taken at one grid. It also carries the MOM6 consequence: the model
+    # decomposes across ranks, so a rank drives its GPU with ITS OWN TILE, not the
+    # whole domain. If the curve is still falling at 10^5 columns then a rank
+    # holding a small tile never reaches these numbers.
+    grid = {}
+    for r in rows:
+        if r["stack_policy"] != "fit" or r["nzstack"] == "":
+            continue
+        if r["mode"].startswith("dc_gpu") or r["mode"] == "cuda_faithful":
+            kind = "CUDA" if r["mode"] == "cuda_faithful" else "do concurrent"
+            key = f"{short_dev(r)}, {kind}"
+            grid.setdefault(key, {}).setdefault(int(r["nz"]), []).append(
+                (int(r["ncols"]), float(r["ns_per_col"])))
+    # keep the depth with the widest grid coverage, so the panel is one clean
+    # curve per lane rather than a mix of depths
+    o["grid"] = {}
+    for k, byz in grid.items():
+        best = max(byz, key=lambda z: len({c for c, _ in byz[z]}))
+        pts = sorted({c: v for c, v in sorted(byz[best])}.items())
+        if len(pts) >= 3:
+            o["grid"][k] = {"nz": best, "pts": pts}
     d = {}
     for r in rows:
         if r["mode"] in ("dc_serial", "serial_do") and r["stack_policy"] == "fit" and r["nxp"] == "64":
