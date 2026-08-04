@@ -38,7 +38,7 @@ program dc_main
    use constants, only: wp, NZ_STACK_MAX
    use grid, only: hgrid_t
    use multilayer_cgrid_state, only: multilayer_cgrid_state_t
-   use ocean_eos, only: EOS_VARIANT_LINEAR
+   use ocean_eos, only: EOS_VARIANT_LINEAR, EOS_VARIANT_WRIGHT_97
    use ks, only: ocean_kappa_shear_t, kappa_shear_column_kernel, &
                  KS_VARIANT, KS_LANES
 #ifdef KS_WITH_CUDA
@@ -66,6 +66,8 @@ program dc_main
 
    real(wp) :: t0, t1, ms_dc, gib, kd_min, kd_max, kd_sum
    real(wp) :: target_ms, ms_probe, ns_per_col
+   real(wp) :: dt_step
+   character(len=16) :: phys_prof
    integer :: max_reps
    integer :: i, j, k, rep, nx, ny, nz, nxp, nyp, n_reps, n_warm
    integer :: ncol, nwet, land_pct, iu, ios
@@ -166,6 +168,30 @@ program dc_main
    ksh%eos%alpha_T = 0.2_wp     ! &ocean_ic_nml alpha_T -> ocean_state.F90:474
    ksh%eos%beta_S = 7.6e-4_wp   ! ocean_eos.F90 default (no nml override)
    ksh%rho0 = 1035.0_wp
+
+   !! ---- PHYSICS PROFILE -------------------------------------------------
+   !! `faithful` (default) reproduces every recorded run: the knob values are
+   !! MOM6's *code* defaults, which is what ocean_kappa_shear.F90 carries.
+   !! `prod` swaps in the values an actual OM4_025/OM5_025 configuration sets,
+   !! which differ from the code defaults by up to 150x. This exists because
+   !! those knobs feed the ITERATION COUNT -- kappa_0 sets the profile
+   !! pre-smoothing and the adaptive-dt tolerance bands, kappa_trunc sets the
+   !! width of the active kappa band, and dt is what the outer loop subdivides.
+   !! At the faithful settings every column takes exactly ONE substep, so the
+   !! adaptive-substepping level of the loop nest is never exercised.
+   !!   KS_PHYS=prod ./dc_...    -- switch the whole set
+   !! Nothing here touches ks.F90; these are all runtime fields.
+   dt_step = DT_THERM
+   phys_prof = 'faithful'
+   call get_environment_variable('KS_PHYS', envbuf, status=ios)
+   if (ios == 0 .and. trim(envbuf) == 'prod') then
+      phys_prof = 'prod'
+      dt_step = 7200.0_wp          ! OM4_025.JRA DT_THERM (vs 300 code-side)
+      ksh%kappa_0 = 1.5e-5_wp       ! OM4_025 KD        (vs 1.0e-7)
+      ksh%kappa_trunc = 1.5e-7_wp   ! = 0.01*kappa_0    (vs 1.0e-9)
+      ksh%max_inner_it = 25         ! OM4 MAX_RINO_IT   (vs 50)
+      ksh%eos%variant = EOS_VARIANT_WRIGHT_97
+   end if
    ksh%kd_int = 0.0_wp; ksh%tke_int = 0.0_wp
 
    nwet = count(ms%wet_mask > 0.0_wp)
@@ -217,7 +243,7 @@ program dc_main
    ! Knobs across the bind(C) boundary. Field ORDER is the contract -- it must
    ! match ks_par_t in ks_bridge.F90 and struct KsPar in both .cu files, or the
    ! kernel gets garbage knobs and still runs happily.
-   par%dt = DT_THERM
+   par%dt = dt_step
    par%ri_crit = ksh%ri_crit
    par%shearmix_rate = ksh%shearmix_rate
    par%fri_curvature = ksh%fri_curvature
@@ -399,7 +425,7 @@ contains
    subroutine run_variant(iv)
       integer, intent(in) :: iv
       if (iv == 1) then
-         call kappa_shear_column_kernel(hgrid, ksh, ms, hT, hS, DT_THERM)
+         call kappa_shear_column_kernel(hgrid, ksh, ms, hT, hS, dt_step)
 #ifdef KS_WITH_CUDA
       else if (iv == 2) then
          call launch_cu(0)
@@ -523,6 +549,7 @@ contains
       write (output_unit, '(a,i0)', advance='no') ' reps=', reps_v(iv)
       write (output_unit, '(a,i0)', advance='no') ' warm=', n_warm
       write (output_unit, '(a,i0)', advance='no') ' land_pct=', land_pct
+      write (output_unit, '(2a)', advance='no') ' phys=', trim(phys_prof)
       write (output_unit, '(2a)', advance='no') ' ms=', trim(rs(ms_v(iv)))
       write (output_unit, '(2a)', advance='no') ' ns_per_col=', trim(rs(nspc))
       write (output_unit, '(2a)', advance='no') ' kd_sum=', trim(rs(kdsum_v(iv)))

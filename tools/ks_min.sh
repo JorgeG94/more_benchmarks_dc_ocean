@@ -76,7 +76,7 @@ GHASH="$(cd "$REPO" && git rev-parse --short HEAD 2>/dev/null || echo nogit)"
 CSV="$OUT/ks_min_${HOSTN}_${TS}.csv"
 
 KS_COLS="experiment,mode,impl,launcher,variant,lanes,compiler,compiler_ver,flags,\
-stack_policy,copy_policy,nzstack,bcopy,opt_nzmax,minblocks,\
+stack_policy,copy_policy,phys,nzstack,bcopy,opt_nzmax,minblocks,\
 threads,proc_bind,device,gpu_arch,nxp,nyp,nx,ny,ncols,nwet,nz,land_pct,\
 reps,warm,nrun,ms_min,ms_med,ns_per_col,it_outer,it_inner,\
 kd_sum,kd_min,kd_max,regs,local_b,status,git_hash,host,timestamp"
@@ -89,27 +89,56 @@ _q() { printf '%s' "$1" | tr '\n"' " '"; }
 # so ask it rather than reconstructing them here.
 # ---------------------------------------------------------------------------
 MKVARS=(); MKTARGET=""; BINVAR=""
+# FLAGVARS: which make variable(s) actually spell the compile line for THIS
+# mode. Not cosmetic -- the CSV's `flags` column is the paper's provenance, and
+# hardcoding BASE_FFLAGS+DC_MODE_FLAGS made a gfortran serial-do build on a Mac
+# record `-stdpar=gpu -acc=gpu -gpu=cc90,mem:separate`: the serialdo path
+# compiles with SD_FFLAGS and never sees a data layer, and with no DATA= in
+# MKVARS the Makefile's DC_MODE_FLAGS defaults to the GPU one. Timings were
+# never affected; the record of how they were produced was.
 set_make_args() {   # $1 = nzstack, $2 = counters(0|1)
    local nzs="$1" cnt="$2"
    MKVARS=(FC="$FC" ARCH="$ARCH" NVARCH="$NVARCH" NZSTACK="$nzs" CNT="$cnt"
            BCOPY="$BCOPY")
    case "$MODE" in
-      serial_do)    MKTARGET=serialdo; BINVAR=SDBIN;;
-      dc_serial)    MKTARGET=dc; BINVAR=DCBIN
+      serial_do)    MKTARGET=serialdo; BINVAR=SDBIN; FLAGVARS="SD_FFLAGS";;
+      dc_serial)    MKTARGET=dc; BINVAR=DCBIN; FLAGVARS="BASE_FFLAGS DC_MODE_FLAGS"
                     MKVARS+=(DATA=none DC_HOST_FLAGS=);;
-      dc_multicore) MKTARGET=dc; BINVAR=DCBIN
+      dc_multicore) MKTARGET=dc; BINVAR=DCBIN; FLAGVARS="BASE_FFLAGS DC_MODE_FLAGS"
                     MKVARS+=(DATA=none);;   # config.mk supplies the host flag
-      dc_gpu)       MKTARGET=dc; BINVAR=DCBIN
+      dc_gpu)       MKTARGET=dc; BINVAR=DCBIN; FLAGVARS="BASE_FFLAGS DC_MODE_FLAGS"
                     MKVARS+=(DATA="$DATA")
                     [ -n "$DC_GPU_FLAGS" ] && MKVARS+=("DC_MODE_FLAGS=$DC_GPU_FLAGS");;
       *) echo "MODE must be serial_do | dc_serial | dc_multicore | dc_gpu" >&2; exit 2;;
    esac
 }
+# The CUDA side's FULLCOPY must be the MIRROR of the Fortran side's BCOPY --
+# see kappa_shear/Makefile, "THIS IS THE 1:1 PAIRING KNOB":
+#   BCOPY=0 (Fortran copies O(NZSTACK))  <->  FULLCOPY=1 (CUDA copies O(NZSTACK))
+#   BCOPY=1 (Fortran copies O(nz))       <->  FULLCOPY=0 (CUDA copies O(nz))
+# Both default to 0 in the Makefile, which is the MISMATCHED diagonal: Fortran
+# copying 128 doubles per substep against CUDA copying nz. That does not measure
+# codegen, it measures a copy the two sides were not asked to do equally -- and
+# it inflates the dc/cuda ratio hardest at shallow nz, where NZSTACK/nz is
+# largest. Derived here rather than passed, so the two can never drift apart.
 set_cmp_args() {    # $1 = nzstack, $2 = counters
    MKVARS=(FC="$FC" ARCH="$ARCH" NVARCH="$NVARCH" NZSTACK="$1" CNT="$2"
-           BCOPY="$BCOPY" OPT_NZMAX="$1")
-   MKTARGET=cmp; BINVAR=CMPBIN
+           BCOPY="$BCOPY" FULLCOPY="$((1 - BCOPY))" OPT_NZMAX="$1")
+   MKTARGET=cmp; BINVAR=CMPBIN; FLAGVARS="CMP_FFLAGS CMP_CUFLAGS"
 }
+FLAGVARS="BASE_FFLAGS DC_MODE_FLAGS"
+# What the three whole-array assignments in ks_solve_column actually copied, and
+# -- for a cmp run -- whether the CUDA side was asked to copy the same amount.
+# This column used to be the literal string "prod" in every row ever written, so
+# the one axis that decides whether a dc-vs-cuda ratio means anything was not
+# recorded at all.
+copy_policy() {
+   local f=full; [ "$BCOPY" = 1 ] && f=bounded
+   [ "${USING_CMP:-0}" = 1 ] && printf 'paired-%s' "$f" || printf '%s' "$f"
+}
+# the resolved compile line for the build that was actually run
+flags_str() { local v out=""; for v in $FLAGVARS; do out="$out $(mkprint "$v")"; done
+              printf '%s' "${out# }"; }
 mkprint() { ( cd "$KDIR" && "$MAKE" -s "print-$1" "${MKVARS[@]}" 2>/dev/null ); }
 
 # ---------------------------------------------------------------------------
@@ -119,6 +148,7 @@ run_bin() {   # $1 bin, $2 nz, $3 reps, $4 warm, $5 threads, $6 nzstack
    local frame_mb=$(( (60 * ($6 + 1) * 8 + 1048575) / 1048576 ))
    local stk=$(( frame_mb * 8 )); [ "$stk" -lt 64 ] && stk=64
    ( cd "$KDIR" && env KS_TARGET_MS="$KS_TARGET_MS" KS_MAX_REPS="$KS_MAX_REPS" \
+        KS_PHYS="$KS_PHYS" \
         OMP_NUM_THREADS="$5" ACC_NUM_CORES="$5" \
         OMP_PROC_BIND=close OMP_PLACES=cores OMP_STACKSIZE="${stk}M" \
         ./"$1" "$NXP" "$NYP" "$2" "$3" "$4" "$LAND_PCT" 2>&1 )
@@ -155,7 +185,7 @@ gpu_res_usage() {   # $1 = binary (relative to KDIR); prints "REG STACK"
 # RESULT lines are `key=value` tokens, so pull one field at a time instead of
 # building a map.
 # One pass over the line into plain variables -- no subprocesses, no arrays.
-R_KEYS="impl ms variant lanes bcopy nx ny ncols nwet nz reps kd_sum kd_min kd_max regs local_b it_outer it_inner"
+R_KEYS="impl ms variant lanes bcopy phys nx ny ncols nwet nz reps kd_sum kd_min kd_max regs local_b it_outer it_inner"
 parse_line() {
    local t k v
    for k in $R_KEYS; do eval "R_$k="; done
@@ -183,10 +213,10 @@ emit() {  # $1 impl $2 status $3 ms_min $4 ms_med $5 nspc $6 it_out $7 it_in $8 
    local mode_out="$1" launcher=solo
    [ "$1" = dc ] && mode_out="$MODE"
    [ "${USING_CMP:-0}" = 1 ] && { launcher=cmp; [ "$1" = dc ] && mode_out=dc_gpu; }
-   printf '%s,%s,%s,%s,%s,%s,%s,"%s","%s",%s,%s,%s,%s,%s,%s,%s,%s,"%s",%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+   printf '%s,%s,%s,%s,%s,%s,%s,"%s","%s",%s,%s,%s,%s,%s,%s,%s,%s,%s,"%s",%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
      "nz" "$mode_out" "$1" "$launcher" "$(rv variant faithful)" "$(rv lanes 1)" \
-     "$FC" "$(_q "$FCVER")" "$(_q "$(mkprint BASE_FFLAGS) $(mkprint DC_MODE_FLAGS)")" \
-     "$9" "prod" "$8" "$(rv bcopy 0)" "$8" "0" \
+     "$FC" "$(_q "$FCVER")" "$(_q "$(flags_str)")" \
+     "$9" "$(copy_policy)" "$(rv phys faithful)" "$8" "$(rv bcopy 0)" "$8" "0" \
      "${10}" "close" "$(_q "$DEVICE")" "$GPU_ARCH_LABEL" \
      "$NXP" "$NYP" "$(rv nx)" "$(rv ny)" "$(rv ncols)" "$(rv nwet)" \
      "$(rv nz)" "$LAND_PCT" "$(rv reps)" "$KS_WARM" "$NRUN" \
