@@ -142,3 +142,5 @@ kappa_shear/*.nsys-rep
 kappa_shear/*.sqlite
 kappa_shear/.ks_sweep_*.log
 kappa_shear/.ks_min_*.log
+
+# figures/ IS tracked (regenerate with tools/ks_plot.py after new data lands)
