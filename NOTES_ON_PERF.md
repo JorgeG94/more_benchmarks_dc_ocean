@@ -299,6 +299,12 @@ every `make`, and recorded per row.
 in kappa_shear/OPTIMIZATION.md.** Both were measured on NVIDIA. They do not
 transfer.
 
+**The AMD answers are BIT-IDENTICAL to NVIDIA** at all six depths and both
+policies -- one `do concurrent` source, OpenACC on NVIDIA and OpenMP-target
+device offload on AMD (amdflang 23.0.0git, gfx90a), same kd_sum to the last
+digit, same iteration counts. The portability claim holds on the numbers, not
+just on "it compiled".
+
 Same source, same binary but for one compile-time constant, and `it_inner` is
 IDENTICAL between the two policies at every nz -- so the work is provably the
 same and the whole difference is the per-thread frame. `prod` / `fit` cost ratio:
@@ -323,14 +329,23 @@ here, not a caveat to scale up: MOM6 runs one rank per GCD (Frontier has 4x
 MI250X = 8 GCDs/node) and one rank per GPU on GH200, so these ARE the per-rank
 figures.
 
+**The instability is itself a result, and it makes the 3x a LOWER BOUND.**
+median-min spread over NRUN=3: `fit` 0.0-0.2% at every depth; `prod` 17.9%,
+66.4%, 17.7% at nz = 10, 25, 30, settling to 0.3-4.4% by nz=50. So `ms_min`
+flatters the unstable series. On medians the penalty is 4.9x at nz=25 and 3.6x
+at nz=30, versus 2.9x / 3.0x on minima. A 66% run-to-run swing is arguably worse
+than being slow for an operational model -- you cannot schedule against it --
+and the `fit` builds on the same GPU are flat to 0.1%.
+
 ⚠ **The MI250X `prod` series is NON-MONOTONIC and must not be quoted point by
 point**: 723, 495, 681, 504, 806, 1170 ns/col over nz = 10..100. nz=10 costs
 more than nz=25 despite an identical frame and 9x FEWER Picard iterations
 (300k vs 2.78M), which is not physically possible. The `fit` series on the same
 machine is perfectly monotonic (49, 169, 225, 459, 849, 1144), so the harness is
 sound and the instability is specific to the large-frame builds -- consistent
-with occupancy collapsing to very few waves at 66 KB/thread of scratch. Check
-ms_med vs ms_min before quoting any single `prod` point. The QUALITATIVE finding
+with occupancy collapsing to very few waves at 66 KB/thread of scratch. The
+ms_med-vs-ms_min check above confirms it is variance, not physics: the ordering
+anomaly is an unlucky draw, not a discontinuity. The QUALITATIVE finding
 does not depend on it: `fit` at nz=30 is 225 ns/col and every `prod`
 measurement is 495-806.
 
