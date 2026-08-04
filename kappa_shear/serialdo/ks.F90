@@ -2,22 +2,18 @@
 !! the ocean model's kappa-shear (JHL08) column kernel, extracted for the
 !! `do concurrent` vs hand-written-CUDA-C benchmark.
 !!
-!! SOURCE: <model>/src/parameterizations/vertical/structured/ocean_kappa_shear.F90
-!! (1443 lines). The six column-solve helpers —
 !!   ks_src_func         (:474-490)
 !!   ks_precompute       (:492-553)
 !!   ks_projected_state  (:555-692)
 !!   ks_find_kappa_tke   (:694-934)
 !!   ks_adaptive_dt      (:936-1064)
 !!   ks_solve_column     (:1066-1430)
-!! — are VERBATIM. Not one arithmetic line was changed.
 !!
 !! ============================================================================
 !! ⚠ WHAT WAS DROPPED, AND WHY — READ THIS BEFORE QUOTING ANY NUMBER
 !! ============================================================================
 !! This is a TRANSCRIPTION of `kappa_shear_column_kernel` (:296-466), not a
-!! verbatim copy. Exactly three things were removed. Each is dead in the
-!! production configs (~/analysis_gebco/gabight_sph_acc_v100.nml and siblings):
+!! verbatim copy. Exactly three things were removed. 
 !!
 !! 1. THE D4 MASSLESS-MERGE PATH (production :336-341, :378-386, :390-420).
 !!    Gated on `this%massless_merge`, whose default is `.false.`
