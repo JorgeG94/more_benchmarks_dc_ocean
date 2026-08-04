@@ -186,7 +186,7 @@ def build(D, T, dark):
     finish(ax, T, "Single GPU speedup versus whole CPU",
            "same do concurrent source on both sides, both at 473×297 (145,137 columns)\n"
            "CPU is the full socket; at this size Broadwell and Grace exceed L3, EPYC and Xeon Max do not",
-           "nz", "GPU ÷ whole-CPU-socket", nz)
+           "nz", "speedup over 1 CPU socket", nz)
     ax.annotate("GPU slower", (nz[0], 0.985), xytext=(6, -14), textcoords="offset points",
                 ha="left", fontsize=9, color=T["ink3"], style="italic")
     # Identity via the legend only -- the pair names are long and duplicating them
