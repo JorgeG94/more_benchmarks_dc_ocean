@@ -183,7 +183,56 @@ contains
       real(wp), intent(in) :: hS(:, :, :)
       real(wp), intent(in) :: dt
 
-      integer :: i, j, k, l, kg, ib, nblk, nx, ny, nz
+      call ks_blocks_dc(grid%nx_total, grid%ny_total, ms%nz_ml, dt, &
+                        ms, hT, hS, this%f_centre, this%lz_rescale, &
+                        this%rho0, this%ri_crit, this%shearmix_rate, &
+                        this%fri_curvature, this%c_n, this%c_s, &
+                        this%lambda, this%kappa_0, this%kappa_seed, &
+                        this%kappa_trunc, this%tke_bg, this%tol_err, &
+                        this%max_inner_it, this%max_substep_it, &
+                        this%src_max_chg, this%vel_underflow, this%eos, &
+                        this%kd_int, this%tke_int &
+#ifdef KS_COUNTERS
+                        , this%it_outer, this%it_inner &
+#endif
+                        )
+   end subroutine kappa_shear_column_kernel
+
+   pure subroutine ks_blocks_dc(nx, ny, nz, dt, ms, hT, hS, f_centre, &
+                                lz_rescale, rho0, ri_crit, shearmix_rate, &
+                                fri_curvature, c_n, c_s, lambda, kappa_0, &
+                                kappa_seed, kappa_trunc, tke_bg, tol_err, &
+                                max_inner_it, max_substep_it, src_max_chg, &
+                                vel_underflow, eos, kd_int, tke_int &
+#ifdef KS_COUNTERS
+                                , it_outer, it_inner &
+#endif
+                                )
+      !! ⚠ THIS SPLIT EXISTS FOR ONE COMPILER, AND IS NUMERICALLY INERT.
+      !! Identical in purpose to `ks_columns_dc` in ks.F90 — see the long note
+      !! there. AMD flang's `-fdo-concurrent-to-openmp=device` cannot map a
+      !! derived type owning a derived-type component, and
+      !! `ocean_kappa_shear_t` owns `type(ocean_eos_t) :: eos`. So `this` is
+      !! dereferenced on the host and the loop sees flat dummies only. Not one
+      !! arithmetic line changed; `make verify-variant` is the gate.
+      integer, intent(in) :: nx, ny, nz
+      real(wp), intent(in) :: dt
+      type(multilayer_cgrid_state_t), intent(in) :: ms
+      real(wp), intent(in) :: hT(:, :, :)
+      real(wp), intent(in) :: hS(:, :, :)
+      real(wp), intent(in) :: f_centre(:, :)
+      real(wp), intent(in) :: lz_rescale, rho0, ri_crit, shearmix_rate
+      real(wp), intent(in) :: fri_curvature, c_n, c_s, lambda
+      real(wp), intent(in) :: kappa_0, kappa_seed, kappa_trunc, tke_bg, tol_err
+      integer, intent(in) :: max_inner_it, max_substep_it
+      real(wp), intent(in) :: src_max_chg, vel_underflow
+      type(ocean_eos_t), intent(in) :: eos
+      real(wp), intent(inout) :: kd_int(:, :, :), tke_int(:, :, :)
+#ifdef KS_COUNTERS
+      integer, intent(inout) :: it_outer(:, :), it_inner(:, :)
+#endif
+
+      integer :: i, j, k, l, kg, ib, nblk
       real(wp) :: f2_val(VL), hk, inv_h
       logical :: act(VL)
       real(wp) :: h_sd(VL, NZL), u_sd(VL, NZL), v_sd(VL, NZL)
@@ -195,9 +244,6 @@ contains
       integer :: n_out_l(VL), n_in_l(VL)
 #endif
 
-      nx = grid%nx_total
-      ny = grid%ny_total
-      nz = ms%nz_ml
       nblk = (nx + VL - 1)/VL
 
       do concurrent(j=1:ny, ib=1:nblk) &
@@ -252,7 +298,7 @@ contains
          do l = 1, VL
             i = (ib - 1)*VL + l
             if (act(l)) then
-               f2_val(l) = this%f_centre(i, j)*this%f_centre(i, j)
+               f2_val(l) = f_centre(i, j)*f_centre(i, j)
             else
                f2_val(l) = 0.0_wp
             end if
@@ -276,17 +322,17 @@ contains
             end do
          end do
 
-         call ks_precompute(nz, this%lz_rescale, h_sd, &
+         call ks_precompute(nz, lz_rescale, h_sd, &
                             idz_s, idz_int_s, hint_s, il2_s)
 
-         call ks_solve_column(nz, dt, f2_val, this%rho0, &
-                              this%ri_crit, this%shearmix_rate, &
-                              this%fri_curvature, this%c_n, this%c_s, &
-                              this%lambda, this%kappa_0, this%kappa_seed, &
-                              this%kappa_trunc, this%tke_bg, this%tol_err, &
-                              this%max_inner_it, this%max_substep_it, &
-                              this%src_max_chg, this%vel_underflow, &
-                              this%eos, &
+         call ks_solve_column(nz, dt, f2_val, rho0, &
+                              ri_crit, shearmix_rate, &
+                              fri_curvature, c_n, c_s, &
+                              lambda, kappa_0, kappa_seed, &
+                              kappa_trunc, tke_bg, tol_err, &
+                              max_inner_it, max_substep_it, &
+                              src_max_chg, vel_underflow, &
+                              eos, &
                               h_sd, u_sd, v_sd, t_sd, s_sd, &
                               idz_s, idz_int_s, hint_s, il2_s, &
                               kappa_avg_sd, tke_avg_sd &
@@ -304,11 +350,11 @@ contains
                kg = nz + 2 - k
                if (i <= nx) then
                   if (act(l)) then
-                     this%kd_int(i, j, kg) = kappa_avg_sd(l, k)
-                     this%tke_int(i, j, kg) = tke_avg_sd(l, k)
+                     kd_int(i, j, kg) = kappa_avg_sd(l, k)
+                     tke_int(i, j, kg) = tke_avg_sd(l, k)
                   else
-                     this%kd_int(i, j, kg) = 0.0_wp
-                     this%tke_int(i, j, kg) = 0.0_wp
+                     kd_int(i, j, kg) = 0.0_wp
+                     tke_int(i, j, kg) = 0.0_wp
                   end if
                end if
             end do
@@ -316,18 +362,18 @@ contains
          do l = 1, VL
             i = (ib - 1)*VL + l
             if (i <= nx) then
-               this%kd_int(i, j, 1) = 0.0_wp
-               this%kd_int(i, j, nz + 1) = 0.0_wp
-               this%tke_int(i, j, 1) = 0.0_wp
-               this%tke_int(i, j, nz + 1) = 0.0_wp
+               kd_int(i, j, 1) = 0.0_wp
+               kd_int(i, j, nz + 1) = 0.0_wp
+               tke_int(i, j, 1) = 0.0_wp
+               tke_int(i, j, nz + 1) = 0.0_wp
 #ifdef KS_COUNTERS
-               this%it_outer(i, j) = n_out_l(l)
-               this%it_inner(i, j) = n_in_l(l)
+               it_outer(i, j) = n_out_l(l)
+               it_inner(i, j) = n_in_l(l)
 #endif
             end if
          end do
       end do
-   end subroutine kappa_shear_column_kernel
+   end subroutine ks_blocks_dc
 
    ! =================================================================
    ! Column solve helpers -- arithmetic VERBATIM from ks.F90, control

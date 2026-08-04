@@ -1,3 +1,4 @@
+#include "directives.h"
 !! MRE stubs for the kappa-shear column kernel's environment: the horizontal
 !! grid, the multilayer C-grid state, and the EOS handle. Every field name and
 !! default is verbatim from production; only the UNUSED fields are dropped.
@@ -93,13 +94,24 @@ module ocean_eos
       real(wp) :: beta_S = 7.6e-4_wp
    end type ocean_eos_t
 
+#ifdef DC_DATA_OMP
+   !! Same reason as the list in ks.F90: the per-procedure marker below is what
+   !! nvfortran uses, but ifx only honours a module-scope `declare target`. AMD
+   !! flang needs SOMETHING here either way — without a device copy of
+   !! `eos_specvol_derivs` the offload image fails to link:
+   !!   ld.lld: error: undefined symbol: _QMocean_eosPeos_specvol_derivs
+   !!   >>> referenced by ... _QMksPks_solve_column
+   !! (it is called from inside the column solve, i.e. on the device).
+   !$omp declare target(eos_specvol_derivs)
+#endif
+
 contains
 
    !! Verbatim from ocean_eos.F90 `eos_specvol_derivs`, minus the
    !! ROQUET_SPV branch (its point routine is 200 lines of coefficient table
    !! and production does not select it). LINEAR + WRIGHT retained.
    pure subroutine eos_specvol_derivs(eos, T, S, p, dsv_dt, dsv_ds)
-      !$acc routine seq
+      DC_ROUTINE_SEQ
       type(ocean_eos_t), intent(in) :: eos
       real(wp), intent(in) :: T, S
       real(wp), intent(in) :: p
