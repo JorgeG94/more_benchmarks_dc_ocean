@@ -109,7 +109,13 @@ gpu_res_usage() {   # $1 = binary (relative to KDIR); prints "REG STACK"
       /REG:/{ r=0; st=0
          if (match($0,/REG:[0-9]+/))   r  = substr($0,RSTART+4,RLENGTH-4)+0
          if (match($0,/STACK:[0-9]+/)) st = substr($0,RSTART+6,RLENGTH-6)+0
-         if (f ~ /column_kernel_[0-9]+_gpu/) { br=r; bs=st } }
+         # nvfortran names device kernels <module>_<procedure>_<line>_gpu. Match
+         # the SUFFIX and take the biggest frame rather than a specific
+         # procedure name: pinning the name to `column_kernel` silently returned
+         # nothing the moment the loop was refactored into ks_column_loop, and a
+         # blank column looks exactly like "the tool is not installed".
+         # The nvcc kernels are C++-mangled (_Z...) so they never match _gpu.
+         if (f ~ /_gpu$/ && st > bs) { br=r; bs=st } }
       END{ if (br+0>0) print br, bs }'
 }
 
