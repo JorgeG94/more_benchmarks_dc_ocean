@@ -165,7 +165,7 @@ def build(D, T, dark):
     # LOG y: the pairs span 0.6x to 5.9x, and on a ratio axis log puts 1.0 in the
     # middle so "twice as fast" and "half as fast" are the same visual distance.
     f, ax = plt.subplots(figsize=(7.6, 4.5))
-    order = ["NVIDIA GH200 / Grace, 72 threads", "NVIDIA V100 / Broadwell, 40 threads",
+    order = ["NVIDIA GH200 / Grace, 72 threads",
              "AMD MI250X, 1 GCD / EPYC 7A53, 56 thr", "Intel Max, 1 tile / Xeon Max, 104 thr"]
     miss = [k for k in order if k not in D["gpu_vs_cpu"]]
     if miss:
@@ -185,7 +185,7 @@ def build(D, T, dark):
     ax.fill_between(nz, 0.5, 1, color=T["ink3"], alpha=0.06, zorder=0)
     finish(ax, T, "Single GPU speedup versus whole CPU",
            "same do concurrent source on both sides, both at 473×297 (145,137 columns)\n"
-           "CPU is the full socket; at this size Broadwell and Grace exceed L3, EPYC and Xeon Max do not",
+           "CPU is the full socket; at this size Grace exceeds its L3 while EPYC and Xeon Max do not",
            "nz", "speedup over 1 CPU socket", nz)
     ax.annotate("GPU slower", (nz[0], 0.985), xytext=(6, -14), textcoords="offset points",
                 ha="left", fontsize=9, color=T["ink3"], style="italic")
@@ -198,8 +198,7 @@ def build(D, T, dark):
 
     # 2 — depth curve
     f, ax = plt.subplots(figsize=(7.6, 4.3))
-    se = [("V100", D["gpu_ns"]["NVIDIA V100"], S[0], False),
-          ("GH200", D["gpu_ns"]["NVIDIA GH200"], S[1], False),
+    se = [("GH200", D["gpu_ns"]["NVIDIA GH200"], S[1], False),
           ("MI250X", D["gpu_ns"]["AMD MI250X"], S[2], False),
           ("Intel Max", D["gpu_ns"]["Intel Max"], S[3], False)]
     plot_lines(ax, T, nz, se)
@@ -212,8 +211,7 @@ def build(D, T, dark):
 
     # 3 — the frame penalty
     f, ax = plt.subplots(figsize=(7.6, 4.3))
-    se = [("V100", D["frame"]["NVIDIA V100"], S[0], False),
-          ("GH200", D["frame"]["NVIDIA GH200"], S[1], False),
+    se = [("GH200", D["frame"]["NVIDIA GH200"], S[1], False),
           ("MI250X", D["frame"]["AMD MI250X"], S[2], False),
           ("Intel Max", D["frame"]["Intel Max"], S[3], False)]
     # LOG y instead of clipping. The MI250X curve runs 14.8x -> 1.0 while the
@@ -231,7 +229,7 @@ def build(D, T, dark):
            "nz", "cost ratio, production ÷ fitted", nz)
     # ABOVE the baseline, not below it: at (0, -22) this note landed on the x
     # tick labels and across the three lines it is describing.
-    ax.annotate("V100, GH200 and Intel Max sit on 1.0", (nz[-1], 1.0),
+    ax.annotate("GH200 and Intel Max sit on 1.0", (nz[-1], 1.0),
                 textcoords="offset points", xytext=(-4, 34), ha="right",
                 fontsize=9, color=T["ink3"], style="italic")
     lg = ax.legend(loc="upper right", ncols=2, title="cost ratio  =  t(NZ_STACK_MAX=128)  ÷  t(NZ_STACK_MAX=nz+1)")
@@ -248,8 +246,7 @@ def build(D, T, dark):
     f, ax = plt.subplots(figsize=(7.6, 4.0))
     j0 = nz.index(50)
     nzd = nz[j0:]
-    se = [("V100", D["frame"]["NVIDIA V100"][j0:], S[0], False),
-          ("GH200", D["frame"]["NVIDIA GH200"][j0:], S[1], False),
+    se = [("GH200", D["frame"]["NVIDIA GH200"][j0:], S[1], False),
           ("MI250X", D["frame"]["AMD MI250X"][j0:], S[2], False),
           ("Intel Max", D["frame"]["Intel Max"][j0:], S[3], False)]
     plot_lines(ax, T, nzd, se, baseline=1.0)

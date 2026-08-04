@@ -495,6 +495,48 @@ environment per launch.
   thing that separates "the DC->target lowering is weak" from "this vendor's
   offload stack is slow" -- the vendor-neutral analogue of the CUDA comparison
 
+## What the domain sweep does and does not vary (write this into the paper)
+
+The production configuration is **473x297 at 0.05 degrees**. The grid sweep in
+`fig8` runs the same kernel from 32x32 up to 2048x2048, and it is important to be
+precise about what that changes, because it is easy to describe wrongly.
+
+**kappa_shear is horizontally local.** No `dx`, `dy`, cell area or lat/lon
+spacing appears anywhere in the column solve. The only `i+-1` reference in the
+entire kernel is `u_face_x_layer(i+1,j,kg)` -- the C-grid face-to-centre average
+during the gather, not a stencil inside the solve. Every column is solved
+independently from its own vertical profile, so the 0.05 degrees enters MOM6's
+physics through the HORIZONTAL operators (advection, viscosity, pressure
+gradient) and does not reach this kernel at all. What the kernel sees is `nz`,
+the layer thicknesses, and each column's own T/S/u/v.
+
+**This is confirmed by measurement, not just by reading the source.**
+`it_inner/column = 20.23` at every grid from 1,444 to 4,218,916 columns -- a
+2,900x range with identical work per column. If horizontal resolution touched
+the solve, that number would move.
+
+**So the sweep varies device occupancy, not resolution.** Larger grids change
+only HOW MANY independent columns the device is given. `fig8`'s x axis should be
+described as *columns solved* or *device occupancy*, never as resolution or
+domain extent.
+
+**The wording trap.** `build_state` maps a FIXED lat/lon extent (-60.6 to -30.9
+degrees) onto whatever `nxp x nyp` it is given, so 2048x2048 is *the same ocean
+sampled more finely* -- an effective ~0.012 degrees -- not a larger ocean at
+0.05. That does not affect any measurement here, because the column population
+stays statistically identical (which is exactly why `it/col` is constant), but a
+reader who takes fig8 as "0.05 degrees scaled up to 2048^2" has misread it. If a
+genuinely larger 0.05-degree domain were ever wanted, `build_state` would need to
+extend the lat range with `nyp` rather than rescale it -- a one-line change,
+needed for nothing in this study.
+
+**Corollary that matters for the headline.** Because per-column work is
+grid-invariant, the DC-vs-CUDA ratio can be quoted without a grid caveat: on
+GH200 at nz=75 it is 1.7099 at 145,137 columns and 1.7038 at 4,218,916 -- 0.4%
+apart across 29x the domain, with both implementations shedding ~12% of
+per-column cost over that range. A launch-overhead explanation for the gap would
+have had the ratio decay with size. It does not, so the gap is codegen.
+
 ## Methodology / traps
 
 - **Correctness = bit-identity**, bar `max rel diff < 1e-12` (FMA-contraction
