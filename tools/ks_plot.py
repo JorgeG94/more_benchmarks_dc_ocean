@@ -419,8 +419,11 @@ def build(D, T, dark):
                     label=f"GH200, do concurrent, nz={D['grid'][k]['nz']}")
         allc = sorted({c for k in keys for c, _ in D["grid"][k]["pts"]})
         allv = [v for k in keys for _, v in D["grid"][k]["pts"]]
-        xs = [t for t in (1000, 10000, 100000, 1000000, 10000000)
-              if min(allc) * 0.6 <= t <= max(allc) * 1.6]
+        # 1-2-5 per decade rather than decades alone: over 65k-4.2M a
+        # decade-only axis gives two labels and the reader has to interpolate on
+        # a log scale by eye, which nobody does accurately.
+        xs = [c * 10 ** e for e in range(2, 9) for c in (1, 2, 5)
+              if min(allc) * 0.7 <= c * 10 ** e <= max(allc) * 1.4]
         ax.set_xscale("log")
         lo, hi = min(allv), max(allv)
         # LOG y only when the data spans enough to justify it. With one depth the
@@ -449,8 +452,11 @@ def build(D, T, dark):
                "GH200, do concurrent, frame fitted — a flat line means the device is saturated",
                "domain size (ni × nj)", "ns per column", xs)
         ax.set_xticks(xs)
-        ax.set_xticklabels([f"{int(t/1e6)}M" if t >= 1e6 else f"{int(t/1000)}k"
-                            for t in xs])
+        def _sz(t):
+            if t >= 1e6:
+                return f"{t/1e6:g}M"
+            return f"{t/1e3:g}k" if t >= 1000 else f"{t:g}"
+        ax.set_xticklabels([_sz(t) for t in xs])
         ax.legend(loc="upper right", ncols=1, fontsize=9.5)
         figs["fig8_gridsize"] = f
 
