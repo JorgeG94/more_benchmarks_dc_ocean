@@ -230,7 +230,7 @@ def main():
     # marked, so the figure can say which is which rather than averaging it away.
     PAIRS = [("NVIDIA GH200 / Grace, 72 threads",        "GH200",     "dc_gpu",     "Grace",     "473", "prod"),
              ("AMD MI250X, 1 GCD / EPYC 7A53, 56 thr",   "MI250X",    "dc_gpu",     "EPYC 7A53", "473", "prod"),
-             ("NVIDIA V100 / Broadwell, 40 threads",     "V100",      "dc_gpu_acc", "Broadwell", "64",  "fit"),
+             ("NVIDIA V100 / Broadwell, 40 threads",     "V100",      "dc_gpu_acc", "Broadwell", "473", "prod"),
              ("Intel Max, 1 tile / Xeon Max, 104 thr",   "Intel GPU", "dc_gpu",     "Xeon Max",  "473", "prod")]
     o["gpu_vs_cpu"] = {}
     o["gpu_vs_cpu_samegrid"] = {}

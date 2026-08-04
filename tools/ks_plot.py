@@ -184,8 +184,8 @@ def build(D, T, dark):
     ax.minorticks_off()
     ax.fill_between(nz, 0.5, 1, color=T["ink3"], alpha=0.06, zorder=0)
     finish(ax, T, "Single GPU speedup versus whole CPU",
-           "same do concurrent source on both sides; GPU at 473×297 (145,137 columns)\n"
-           "† CPU measured at 64² rather than the production grid",
+           "same do concurrent source on both sides, both at 473×297 (145,137 columns)\n"
+           "CPU is the full socket; at this size Broadwell and Grace exceed L3, EPYC and Xeon Max do not",
            "nz", "GPU ÷ whole-CPU-socket", nz)
     ax.annotate("GPU slower", (nz[0], 0.985), xytext=(6, -14), textcoords="offset points",
                 ha="left", fontsize=9, color=T["ink3"], style="italic")
